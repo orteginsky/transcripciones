@@ -1,0 +1,56 @@
+
+# Entorno local y variables de entorno
+.env
+.env.*
+
+# Archivos de configuración de entorno virtual
+venv/
+.venv/
+env/
+
+# Archivos de dependencias y lock
+poetry.lock
+Pipfile.lock
+
+# Archivos de salida y datos generados
+data/input/
+data/work/
+data/output/
+
+# Archivos temporales y de sistema
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Archivos de logs
+*.log
+
+# Archivos de usuario y editor
+.vscode/
+.idea/
+*.code-workspace
+
+# Otros archivos a ignorar
+*.pdf
+*.sqlite3
+
+# Archivos de documentación
+consideracionenv.txt
+
+# Archivos de sensibles
+credentials.json
+ortega-473114-a45abfd6e0e1.json
+*.json
+
+
+# Archivos Basura
+prompts.txt
+test_document.txt
+pasos.txt
+algo.txt

@@ -1,0 +1,69 @@
+vertex-audio-app/
+├─ pyproject.toml
+├─ requirements.txt
+├─ README.md
+├─ .env
+├─ .gitignore
+├─ Dockerfile
+├─ Makefile
+│
+├─ src/
+│  ├─ api/                              # 🌐 Capa API REST (FastAPI)
+│  │  ├─ main.py                        # Punto de entrada FastAPI (Cloud Run)
+│  │  ├─ routes/                        
+│  │  │   ├─ audio_routes.py            # Endpoint /process-audio
+│  │  │   └─ health.py                  # Endpoint /health
+│  │  └─ middleware/
+│  │      └─ error_handler.py           # Middleware global para logs y excepciones
+│  │
+│  ├─ domain/                           # 🧩 Entidades y schemas (Pydantic)
+│  │  ├─ schemas.py                     # Modelos de entrada/salida API (AudioRequest, AudioResponse, etc.)
+│  │  └─ prompts/
+│  │      ├─ transcription_prompt.md.j2 # Plantilla del prompt
+│  │      └─ report_prompt.md.j2        # (futuro) para análisis o reportes
+│  │
+│  ├─ ingestion/                        # 📥 Entrada de datos y descargas
+│  │  ├─ auth.py                        # Autenticación OAuth2 (Sheets/Drive)
+│  │  ├─ sheet_loader.py                # Lectura de Google Sheets
+│  │  ├─ drive_loader.py                # Descarga de archivos desde Drive
+│  │  ├─ audio_processor.py             # Normalización / conversión / chunking
+│  │  └─ audio_loader.py                # (opcional) carga local / preprocesamiento
+│  │
+│  ├─ transcription/                    # 🗣️ Transcripción de audio
+│  │  ├─ gemini_transcriber.py          # Transcripción usando Gemini
+│  │  ├─ stt_vertex.py                  # Transcripción usando Speech-to-Text
+│  │  └─ diarization.py                 # (futuro) separación por hablante
+│  │
+│  ├─ llm/                              # 🧠 Clientes de modelos LLM (vía Vertex)
+│  │  ├─ base.py
+│  │  ├─ vertex_client.py
+│  │  ├─ claude_adapter.py
+│  │  └─ mistral_adapter.py
+│  │
+│  ├─ orchestration/                    # 🔄 Orquestación de flujos
+│  │  ├─ runner.py                      # Pipeline principal (usa audio_url en lugar de Sheets)
+│  │  └─ tasks.py                       # Subtareas (descarga, procesar, transcribir)
+│  │
+│  ├─ storage/                          # ☁️ Gestión de archivos
+│  │  ├─ gcs.py                         # Subir / eliminar en Google Cloud Storage
+│  │  └─ local.py                       # I/O local en /tmp
+│  │
+│  ├─ pdf/                              # 📄 Generación de informes (futuro)
+│  │  ├─ renderer.py
+│  │  └─ templates/
+│  │      └─ report.html.j2
+│  │
+│  ├─ logging_conf.py                   # Configuración de logging centralizada
+│  ├─ settings.py                       # Configuración global y lectura de .env
+│  └─ utils/                            # Funciones auxiliares (ej. timestamps, text cleaning)
+│
+├─ tests/
+│  ├─ test_auth.py
+│  ├─ test_runner_integration.py
+│  ├─ test_transcription_gemini.py
+│  └─ test_api_audio.py                 # Test real del endpoint /process-audio
+│
+└─ data/
+   ├─ input/
+   ├─ work/
+   └─ output/
