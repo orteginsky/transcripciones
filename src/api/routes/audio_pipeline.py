@@ -64,7 +64,7 @@ def transcribe_audio(request: AudioRequest):
 
             # 4️⃣ Transcribir con Gemini
             transcription_text = transcribe_audio_chunk(local_wav)
-
+        
         # 5️⃣ Eliminar archivos temporales del bucket
         deleted_files = delete_gcs_files([gcs_mp3_uri, gcs_wav_uri])
 

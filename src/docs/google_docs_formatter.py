@@ -1,123 +1,100 @@
-# src/docs/google_docs_formatter.py
+# src/docs/google_docs_formatter.py (versión corregida)
 import re
 from datetime import datetime
-from googleapiclient.discovery import build
-from src.ingestion.google_auth_manager import get_google_services
 from src.logging_conf import get_logger
+from typing import List, Dict, Any
 
 logger = get_logger(__name__)
 
-def create_formatted_google_doc(title: str, transcript_text: str) -> str:
+def generate_google_docs_requests(title: str, transcript_text: str) -> List[Dict[str, Any]]:
     """
-    Crea un documento de Google Docs formateado con:
-      - Título centrado
-      - Fecha de procesamiento
-      - Líneas de diálogo estilizadas (hablante / notas)
-    Devuelve la URL pública editable del documento.
+    Formatea una transcripción y genera una lista de requests para la API de Google Docs,
+    ajustando dinámicamente los índices de inserción y estilo.
+
+    Args:
+        title (str): El título del documento.
+        transcript_text (str): El texto de la transcripción.
+
+    Returns:
+        List[Dict[str, Any]]: Una lista de requests para el método batchUpdate de la API.
     """
-    _, _, creds = get_google_services()
-    docs_service = build("docs", "v1", credentials=creds)
-    drive_service = build("drive", "v3", credentials=creds)
-
-    # 1️⃣ Crear el documento base
-    doc = docs_service.documents().create(body={"title": title}).execute()
-    doc_id = doc.get("documentId")
-    logger.info(f"Documento creado: {doc_id}")
-
-    # 2️⃣ Preparar contenido inicial
-    date_str = datetime.now().strftime("%d/%m/%Y %H:%M")
-    lines = transcript_text.splitlines()
     requests = []
+    current_index = 1 # El índice 1 es el inicio del cuerpo del documento.
 
-    # Encabezado del documento
-    requests.extend([
-        {"insertText": {"location": {"index": 1}, "text": f"{title}\n"}},
-        {"updateParagraphStyle": {
-            "range": {"startIndex": 1, "endIndex": len(title) + 1},
+    # 1. Título del Documento
+    requests.append({
+        "insertText": {
+            "location": {"index": current_index},
+            "text": title
+        }
+    })
+    requests.append({
+        "updateParagraphStyle": {
+            "range": {"startIndex": current_index, "endIndex": current_index + len(title)},
             "paragraphStyle": {"alignment": "CENTER"},
             "fields": "alignment"
-        }},
-        {"insertText": {"location": {"index": len(title) + 1}, "text": f"Procesado el {date_str}\n\n"}}
-    ])
+        }
+    })
+    current_index += len(title)
 
-    current_index = len(title) + len(date_str) + 5
+    # 2. Fecha de Procesamiento
+    date_str = f"\nProcesado el {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
+    requests.append({
+        "insertText": {
+            "location": {"index": current_index},
+            "text": date_str
+        }
+    })
+    current_index += len(date_str)
 
-    # 3️⃣ Analizar cada línea y aplicar formato
-    for line in lines:
-        if not line.strip():
+    # 3. Contenido de la Transcripción
+    for line in transcript_text.strip().splitlines():
+        line = line.strip()
+        if not line:
             continue
 
-        timestamp_match = re.search(r"\[(\d{1,2}:\d{2}:\d{2})\]", line)
-        speaker_match = re.match(r"([A-Za-zÁÉÍÓÚáéíóúüÜñÑ\s]+):\s*(.*)", line)
-        is_note = line.strip().startswith("[Nota:") or line.strip().startswith("[Observación")
-
-        line_text = line.strip() + "\n"
-        line_length = len(line_text)
-
-        # Insertar texto
+        text_to_insert = line + "\n"
+        
+        # Insertar el texto de la línea
         requests.append({
             "insertText": {
                 "location": {"index": current_index},
-                "text": line_text
+                "text": text_to_insert
             }
         })
 
-        # Aplicar estilo según tipo de línea
+        # Aplicar estilo al texto recién insertado
+        text_length = len(text_to_insert)
+        style_request = {
+            "updateTextStyle": {
+                "range": {
+                    "startIndex": current_index,
+                    "endIndex": current_index + text_length
+                },
+                "textStyle": {},
+                "fields": "foregroundColor" # Por defecto, solo el color de texto
+            }
+        }
+        
+        timestamp_match = re.search(r"\[\d{1,2}:\d{2}:\d{2}\]", line)
+        speaker_match = re.match(r"([A-Za-zÁÉÍÓÚáéíóúüÜñÑ\s]+):\s*(.*)", line)
+        is_note = line.startswith("[Nota:") or line.startswith("[Observación")
+        
         if timestamp_match and speaker_match:
-            # Ejemplo: [00:00:10] Entrevistador: Buenos días
-            requests.append({
-                "updateTextStyle": {
-                    "range": {
-                        "startIndex": current_index,
-                        "endIndex": current_index + len(line_text)
-                    },
-                    "textStyle": {
-                        "bold": True,
-                        "foregroundColor": {"color": {"rgbColor": {"red": 0.0, "green": 0.2, "blue": 0.6}}}
-                    },
-                    "fields": "bold,foregroundColor"
-                }
-            })
+            # Estilo para el diálogo (negrita y color)
+            style_request["updateTextStyle"]["textStyle"]["bold"] = True
+            style_request["updateTextStyle"]["textStyle"]["foregroundColor"] = {"color": {"rgbColor": {"red": 0.0, "green": 0.2, "blue": 0.6}}}
+            style_request["updateTextStyle"]["fields"] += ",bold"
         elif is_note:
-            requests.append({
-                "updateTextStyle": {
-                    "range": {
-                        "startIndex": current_index,
-                        "endIndex": current_index + len(line_text)
-                    },
-                    "textStyle": {
-                        "italic": True,
-                        "foregroundColor": {"color": {"rgbColor": {"red": 0.4, "green": 0.4, "blue": 0.4}}}
-                    },
-                    "fields": "italic,foregroundColor"
-                }
-            })
-        else:
-            # Texto normal
-            requests.append({
-                "updateTextStyle": {
-                    "range": {
-                        "startIndex": current_index,
-                        "endIndex": current_index + len(line_text)
-                    },
-                    "textStyle": {
-                        "foregroundColor": {"color": {"rgbColor": {"red": 0, "green": 0, "blue": 0}}}
-                    },
-                    "fields": "foregroundColor"
-                }
-            })
-
-        current_index += line_length
-
-    # 4️⃣ Enviar las actualizaciones en lote
-    logger.info("Aplicando formato y escribiendo contenido...")
-    docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
-
-    # 5️⃣ Configurar permisos (editable para cualquiera con el enlace)
-    permission = {"type": "anyone", "role": "writer"}
-    drive_service.permissions().create(fileId=doc_id, body=permission).execute()
-
-    public_url = f"https://docs.google.com/document/d/{doc_id}/edit"
-    logger.info(f"Documento final disponible en: {public_url}")
-    return public_url
-    
+            # Estilo para las notas (cursiva y color gris)
+            style_request["updateTextStyle"]["textStyle"]["italic"] = True
+            style_request["updateTextStyle"]["textStyle"]["foregroundColor"] = {"color": {"rgbColor": {"red": 0.4, "green": 0.4, "blue": 0.4}}}
+            style_request["updateTextStyle"]["fields"] += ",italic"
+        
+        requests.append(style_request)
+        
+        # Incrementar el índice para la siguiente inserción
+        current_index += text_length
+        
+    logger.info("Requests de formato generados exitosamente. Total de requests: %d", len(requests))
+    return requests
