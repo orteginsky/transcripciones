@@ -4,6 +4,7 @@ from src.storage.upload_service import save_drive_audio_to_gcs
 from src.storage.audio_normalizer_service import normalize_and_upload_gcs
 from src.storage.gcs_cleaner import delete_gcs_files
 from src.transcription.gemini_transcriber import transcribe_audio_chunk
+from src.docs.google_docs_quick import create_oauth_google_doc
 from src.logging_conf import get_logger
 from src.settings import GCS_BUCKET
 
@@ -18,17 +19,16 @@ router = APIRouter()
 # --- 📦 Schemas ---
 class AudioRequest(BaseModel):
     case_id: str
+    client: str
+    witness: str
+    date_call: str
     audio_link: str
     bucket_name: str | None = None
 
 
 class TranscriptionResponse(BaseModel):
     case_id: str
-    gcs_mp3_uri: str
-    gcs_wav_uri: str
-    transcription_text: str
-    deleted_temp_files: list[str]
-
+    link_doc: str
 
 # --- 🎙️ Pipeline principal ---
 @router.post("/transcribe", response_model=TranscriptionResponse)
@@ -57,25 +57,26 @@ def transcribe_audio(request: AudioRequest):
         bucket = client.bucket(bucket_name)
         blob_path = gcs_wav_uri.replace(f"gs://{bucket_name}/", "")
         blob = bucket.blob(blob_path)
-
+        title= f"Transcription from case id:{request.case_id} to client: {request.client} to witness: {request.witness} at date:{request.date_call}"
         with tempfile.TemporaryDirectory() as tmpdir:
             local_wav = Path(tmpdir) / f"{request.case_id}_16k.wav"
             blob.download_to_filename(local_wav)
 
             # 4️⃣ Transcribir con Gemini
             transcription_text = transcribe_audio_chunk(local_wav)
+            resultado = create_oauth_google_doc(title= title, content= transcription_text)
         
         # 5️⃣ Eliminar archivos temporales del bucket
         deleted_files = delete_gcs_files([gcs_mp3_uri, gcs_wav_uri])
 
+        logger.info(f"Se han eliminado lo siguientes archivos {deleted_files}")
         logger.info("✅ Pipeline completado para %s", request.case_id)
+
+        link=resultado['url']
 
         return TranscriptionResponse(
             case_id=request.case_id,
-            gcs_mp3_uri=gcs_mp3_uri,
-            gcs_wav_uri=gcs_wav_uri,
-            transcription_text=transcription_text,
-            deleted_temp_files=deleted_files,
+            link_doc= link
         )
 
     except Exception as e:

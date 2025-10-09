@@ -1,3 +1,4 @@
+# src.settings
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -57,7 +58,7 @@ if TRANSCRIPTION_PROMPT_FILE.exists():
 else:
     TRANSCRIPTION_PROMPT_TEMPLATE = "Transcribe el siguiente audio."  # fallback
 
-SERVICE_ACCOUNT_SANDBOX_FOLDER = "1T3mxaJahqUc455W1-1VCiYYEra6PO03_"
+SERVICE_ACCOUNT_SANDBOX_FOLDER = Path(os.getenv("SERVICE_ACCOUNT_SANDBOX_FOLDER", "credencial"))
 
 
 if __name__=="__main__":
@@ -66,4 +67,5 @@ if __name__=="__main__":
     print(GOOGLE_APPLICATION_CREDENTIALS)
     print(GOOGLE_OAUTH_CREDENTIALS_FILE)
     print(GOOGLE_OAUTH_TOKEN_FILE)
+    print(SERVICE_ACCOUNT_SANDBOX_FOLDER)
 
