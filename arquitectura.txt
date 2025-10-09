@@ -1,4 +1,4 @@
-vertex-audio-app/
+googlerun/
 ├─ pyproject.toml
 ├─ requirements.txt
 ├─ README.md

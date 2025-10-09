@@ -134,6 +134,49 @@ def split_wav_chunks(
 
     return chunks
 
+def split_wav_chunks_with_overlap(
+    wav_path: Path,
+    chunk_length_ms: int = 40 * 60 * 1000,  # 40 minutos por default
+    overlap_ms: int = 5000,  # Solapamiento de 5 segundos
+    prefix: Optional[str] = None
+) -> list[Path]:
+    """
+    Divide un WAV en fragmentos con un solapamiento específico entre ellos.
+    
+    Args:
+        wav_path (Path): Ruta al archivo WAV.
+        chunk_length_ms (int): Duración de los fragmentos en milisegundos.
+        overlap_ms (int): Solapamiento en milisegundos entre fragmentos.
+        prefix (str, Optional): Prefijo opcional para el nombre de los fragmentos.
+
+    Returns:
+        list[Path]: Lista de rutas a los fragmentos generados.
+    """
+    if not wav_path.exists():
+        raise FileNotFoundError(f"No existe el archivo WAV: {wav_path}")
+
+    audio = AudioSegment.from_wav(wav_path)
+    total_length_ms = len(audio)
+    chunks = []
+
+    # Calcular los fragmentos con solapamiento
+    for i in range(0, total_length_ms, chunk_length_ms - overlap_ms):
+        start_ms = i
+        end_ms = min(i + chunk_length_ms, total_length_ms)
+        chunk = audio[start_ms:end_ms]
+
+        # Prefijo opcional
+        base_name = prefix or wav_path.stem
+        chunk_path = wav_path.parent / f"{base_name}_part{i//(chunk_length_ms - overlap_ms) + 1}.wav"
+
+        # Exporta cada chunk como WAV PCM16
+        export_wav(chunk, chunk_path, enforce_pcm16=True)
+        logger.info("Chunk generado: %s", chunk_path)
+        chunks.append(chunk_path)
+
+    return chunks
+
+
 # -------------------------------
 # Flujo de alto nivel
 # -------------------------------
