@@ -1,4 +1,45 @@
+# src/transcription/merge_transcriptions.py
 import re
+
+def parse_timestamp_to_ms(timestamp: str) -> int:
+    """
+    Convierte un timestamp en formato [HH:MM:SS] o [MM:SS] a milisegundos.
+    
+    Args:
+        timestamp (str): El timestamp en formato [MM:SS] o [HH:MM:SS].
+
+    Returns:
+        int: El tiempo en milisegundos.
+    """
+    parts = timestamp.split(":")
+    if len(parts) == 2:  # [MM:SS]
+        minutes, seconds = map(int, parts)
+        return (minutes * 60 + seconds) * 1000
+    elif len(parts) == 3:  # [HH:MM:SS]
+        hours, minutes, seconds = map(int, parts)
+        return (hours * 3600 + minutes * 60 + seconds) * 1000
+    return 0
+
+def format_timestamp(ms: int) -> str:
+    """
+    Convierte un tiempo en milisegundos a formato [MM:SS] o [HH:MM:SS].
+
+    Args:
+        ms (int): El tiempo en milisegundos.
+
+    Returns:
+        str: El tiempo en formato [MM:SS] o [HH:MM:SS].
+    """
+    seconds = ms // 1000
+    minutes = seconds // 60
+    seconds = seconds % 60
+    hours = minutes // 60
+    minutes = minutes % 60
+
+    if hours > 0:
+        return f"[{hours:02}:{minutes:02}:{seconds:02}]"
+    else:
+        return f"[{minutes:02}:{seconds:02}]"
 
 def merge_transcriptions(audio_base_name: str, transcription_sub_dir: str, chunks_info: list) -> str:
     """
@@ -47,42 +88,4 @@ def merge_transcriptions(audio_base_name: str, transcription_sub_dir: str, chunk
     # Devuelve la transcripción completa unificada
     return "\n".join(full_transcription_content)
 
-def parse_timestamp_to_ms(timestamp: str) -> int:
-    """
-    Convierte un timestamp en formato [HH:MM:SS] o [MM:SS] a milisegundos.
-    
-    Args:
-        timestamp (str): El timestamp en formato [MM:SS] o [HH:MM:SS].
 
-    Returns:
-        int: El tiempo en milisegundos.
-    """
-    parts = timestamp.split(":")
-    if len(parts) == 2:  # [MM:SS]
-        minutes, seconds = map(int, parts)
-        return (minutes * 60 + seconds) * 1000
-    elif len(parts) == 3:  # [HH:MM:SS]
-        hours, minutes, seconds = map(int, parts)
-        return (hours * 3600 + minutes * 60 + seconds) * 1000
-    return 0
-
-def format_timestamp(ms: int) -> str:
-    """
-    Convierte un tiempo en milisegundos a formato [MM:SS] o [HH:MM:SS].
-
-    Args:
-        ms (int): El tiempo en milisegundos.
-
-    Returns:
-        str: El tiempo en formato [MM:SS] o [HH:MM:SS].
-    """
-    seconds = ms // 1000
-    minutes = seconds // 60
-    seconds = seconds % 60
-    hours = minutes // 60
-    minutes = minutes % 60
-
-    if hours > 0:
-        return f"[{hours:02}:{minutes:02}:{seconds:02}]"
-    else:
-        return f"[{minutes:02}:{seconds:02}]"

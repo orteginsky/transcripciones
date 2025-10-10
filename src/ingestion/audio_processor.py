@@ -157,11 +157,11 @@ def split_wav_chunks_with_overlap(
 
     audio = AudioSegment.from_wav(wav_path)
     total_length_ms = len(audio)
-    chunks = []
+    chunks_info = []
 
     # Calcular los fragmentos con solapamiento
     for i in range(0, total_length_ms, chunk_length_ms - overlap_ms):
-        start_ms = i
+        start_ms = i * (chunk_length_ms - overlap_ms)
         end_ms = min(i + chunk_length_ms, total_length_ms)
         chunk = audio[start_ms:end_ms]
 
@@ -171,10 +171,11 @@ def split_wav_chunks_with_overlap(
 
         # Exporta cada chunk como WAV PCM16
         export_wav(chunk, chunk_path, enforce_pcm16=True)
-        logger.info("Chunk generado: %s", chunk_path)
-        chunks.append(chunk_path)
+        
+        logger.info("Chunk generado: %s empezando en: %s", chunk_path, start_ms)
+        chunks_info.append((chunk_path, start_ms))
 
-    return chunks
+    return chunks_info
 
 
 # -------------------------------

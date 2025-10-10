@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copia el código fuente de tu aplicación
 COPY .env .env
 COPY src ./src
+COPY credentials ./credentials
 RUN mkdir -p /app/data/work
 # Cloud Run automáticamente expone el puerto que escucha el contenedor.
 # Tu aplicación debe escuchar en el puerto especificado por la variable de entorno $PORT.

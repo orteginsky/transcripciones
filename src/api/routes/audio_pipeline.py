@@ -1,16 +1,12 @@
 # src/api/routes/audio_pipeline.py
-# librerias externas
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from google.cloud import storage
-
-# Librerias de python
 import tempfile
 from pathlib import Path
 
-# Módulos
 from src.transcription.gemini_transcriber import transcribe_audio_chunk
-from src.transcription.merge_transcriptions import merge_transcriptions
+from src.transcription.merge_transcriptions_in_memory import merge_transcriptions_in_memory
 from src.ingestion.audio_processor import split_wav_chunks_with_overlap
 from src.storage.upload_service import save_drive_audio_to_gcs
 from src.storage.audio_normalizer_service import normalize_and_upload_gcs
@@ -22,32 +18,18 @@ from src.settings import GCS_BUCKET
 logger = get_logger(__name__)
 router = APIRouter()
 
-# --- 📦 Schemas ---
 class AudioRequest(BaseModel):
     case_id: str
     title: str
     audio_link: str
     bucket_name: str | None = None
 
-
 class TranscriptionResponse(BaseModel):
     case_id: str
     link_doc: str
 
-# --- 🎙️ Pipeline principal ---
 @router.post("/transcribe", response_model=TranscriptionResponse)
 def transcribe_audio(request: AudioRequest):
-    """
-    Flujo completo:
-    1. Descargar MP3 desde Drive
-    2. Subir a GCS
-    3. Convertir a WAV 16kHz
-    4. Transcribir con Gemini
-    5. Unificar transcripciones
-    6. Crear documento en Google Docs
-    7. Eliminar archivos temporales del bucket
-    8. Retornar resultado JSON
-    """
     try:
         logger.info("🚀 Iniciando pipeline para %s", request.case_id)
 
@@ -69,31 +51,23 @@ def transcribe_audio(request: AudioRequest):
             local_wav = Path(tmpdir) / f"{request.case_id}_16k.wav"
             blob.download_to_filename(local_wav)
 
-            # 4️⃣ Transcribir con Gemini
-            chunks = split_wav_chunks_with_overlap(local_wav)
-            transcript_chunks = []
-            for chunk in chunks:
-                transcript_chunk = transcribe_audio_chunk(chunk)
-                transcript_chunks.append(transcript_chunk)
+            # 4️⃣ Dividir en chunks con solapamiento y transcribir
+            chunks_info = split_wav_chunks_with_overlap(local_wav)  # [(chunk_path, start_ms), ...]
+            transcript_chunks = [transcribe_audio_chunk(chunk_path) for chunk_path, _ in chunks_info]
 
-            # 5️⃣ Unir las transcripciones y ajustar las marcas de tiempo
-            transcription_text = merge_transcriptions(request.case_id, request.case_id, transcript_chunks)
+            # 5️⃣ Unir transcripciones en memoria
+            chunks_for_merge = [(text, start_ms) for text, (_, start_ms) in zip(transcript_chunks, chunks_info)]
+            transcription_text = merge_transcriptions_in_memory(chunks_for_merge)
 
-            # 6️⃣ Crear el documento de Google Docs con la transcripción unificada
+            # 6️⃣ Crear el documento de Google Docs
             resultado = create_oauth_google_doc(title=title, content=transcription_text)
-        
+
         # 7️⃣ Eliminar archivos temporales del bucket
         deleted_files = delete_gcs_files([gcs_mp3_uri, gcs_wav_uri])
-
-        logger.info(f"Se han eliminado lo siguientes archivos {deleted_files}")
+        logger.info(f"Se han eliminado los siguientes archivos: {deleted_files}")
         logger.info("✅ Pipeline completado para %s", request.case_id)
 
-        link = resultado['url']
-
-        return TranscriptionResponse(
-            case_id=request.case_id,
-            link_doc=link
-        )
+        return TranscriptionResponse(case_id=request.case_id, link_doc=resultado["url"])
 
     except Exception as e:
         logger.exception("❌ Error en pipeline de transcripción: %s", e)
