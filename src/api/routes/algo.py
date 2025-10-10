@@ -8,6 +8,7 @@ from src.ingestion.audio_processor import process_mp3_to_wav16k, split_wav_chunk
 from src.storage.upload_service import save_drive_audio_to_gcs
 from src.storage.audio_normalizer_service import normalize_and_upload_gcs
 from src.storage.gcs_cleaner import delete_gcs_files
+from src.settings import GCS_BUCKET
 from src.logging_conf import get_logger
 from pathlib import Path
 from google.cloud import storage

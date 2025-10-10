@@ -9,5 +9,5 @@ transcription_text = """
 [00:12] Entrevistado: Soy de México.
 """
 
-result = create_oauth_google_doc(title=title, transcript_text=transcription_text, make_public=True)
+result = create_oauth_google_doc(title=title, content=transcription_text, make_public=True)
 print(result)

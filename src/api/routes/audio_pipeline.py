@@ -25,9 +25,7 @@ router = APIRouter()
 # --- 📦 Schemas ---
 class AudioRequest(BaseModel):
     case_id: str
-    client: str
-    witness: str
-    date_call: str
+    title: str
     audio_link: str
     bucket_name: str | None = None
 
@@ -65,7 +63,7 @@ def transcribe_audio(request: AudioRequest):
         bucket = client.bucket(bucket_name)
         blob_path = gcs_wav_uri.replace(f"gs://{bucket_name}/", "")
         blob = bucket.blob(blob_path)
-        title = f"Transcription from case id:{request.case_id} to client: {request.client} to witness: {request.witness} at date:{request.date_call}"
+        title = request.title
 
         with tempfile.TemporaryDirectory() as tmpdir:
             local_wav = Path(tmpdir) / f"{request.case_id}_16k.wav"
