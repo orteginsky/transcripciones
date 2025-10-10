@@ -6,7 +6,7 @@ from pathlib import Path
 
 # Ruta del archivo de log (opcional)
 LOG_FILE = WORK_DIR / "app.log"
-
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 def setup_logging(level: str = "INFO") -> None:
     """
     Configura logging global para la aplicación.
