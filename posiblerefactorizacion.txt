@@ -1,0 +1,127 @@
+Perfecto, gracias por enviar tanto el diagrama como la estructura del proyecto. Con base en tu descripción y arquitectura, voy a darte un análisis detallado sobre cómo está organizado tu proyecto para **transcripciones de llamadas largas**, y recomendaciones sobre posibles ajustes para simplificar, clarificar responsabilidades y optimizar despliegues en Google Cloud Run.
+
+---
+
+## 1️⃣ Observaciones generales
+
+Tu proyecto está organizado de manera modular y clara, con separación por capas:
+
+| Capa             | Contenido / Función                                            | Observación                                                                                                                              |
+| ---------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `api/`           | `main.py`, `routes/audio_pipeline.py`, `health.py`, middleware | Correcto: maneja la capa REST. `audio_pipeline.py` es el endpoint central para transcripciones.                                          |
+| `domain/`        | Schemas de Pydantic y prompts                                  | Perfecto para separar modelos de entrada/salida. Prompts también centralizados.                                                          |
+| `ingestion/`     | Descarga, autenticación, preprocesamiento de audio             | Lógica clara de entrada de datos. Algunos archivos (`audio_loader.py`) podrían eliminarse si solo usas streaming desde GCS.              |
+| `transcription/` | Gemini y Vertex, diarización futura                            | Modular y lista para escalabilidad. `diarization.py` puede integrarse luego.                                                             |
+| `llm/`           | Clientes de LLM (Vertex, Claude, Mistral)                      | Bien separado de `transcription/` para poder cambiar modelo sin tocar pipeline.                                                          |
+| `storage/`       | GCS, normalización, uploads, limpieza                          | Correcto, pero verifica si todos los archivos son necesarios; por ejemplo `drive_uploader.py` podría fusionarse con `upload_service.py`. |
+| `orchestration/` | Runner y tasks                                                 | Perfecto para pipelines independientes. `runner.py` puede convertirse en la función principal para Cloud Run.                            |
+| `pdf/`           | Futuro: generación de reportes                                 | Bien aislado, puede permanecer opcional.                                                                                                 |
+| `maintenance/`   | Limpieza de Drive                                              | Opcional, puede dejarse fuera del deploy.                                                                                                |
+| `utils/`         | Funciones auxiliares                                           | Correcto, mantiene helpers separados.                                                                                                    |
+
+---
+
+## 2️⃣ Recomendaciones para optimizar arquitectura
+
+1. **Eliminar o fusionar módulos que no son críticos para transcripciones**
+
+   * `audio_loader.py` → si solo normalizas y subes a GCS desde Drive, puedes moverlo a `audio_processor.py`.
+   * `drive_uploader.py` → podría fusionarse con `upload_service.py`.
+   * `maintenance/limpia_drive.py` → mantener solo para scripts de mantenimiento, no necesita estar en Cloud Run.
+
+2. **Pipeline central**
+
+   * Tu `audio_pipeline.py` y `orchestration/runner.py` deberían alinearse:
+
+     * `audio_pipeline.py` → REST endpoints.
+     * `runner.py` → lógica de pipeline que puede ser invocada por `audio_pipeline.py`.
+   * Esto separa la lógica de negocio de la exposición API.
+
+3. **Transcripciones en memoria**
+
+   * Usar `merge_transcriptions_in_memory.py` es correcto. Asegúrate de que todos los chunks devueltos por Gemini tengan start_ms para ajustar marcas de tiempo.
+   * Evita escribir archivos temporales si solo los vas a procesar en memoria → simplifica deploy y reduce I/O en `/tmp`.
+
+4. **Dependencias y despliegue**
+
+   * Todo lo que no afecta la transcripción puede eliminarse del `requirements.txt` de producción (tests, pdf, reportlab, etc.).
+   * Mantener solo lo crítico para Cloud Run: `fastapi`, `uvicorn`, `google-cloud-storage`, `google-generativeai`, `pydub`, `ffmpeg-python`.
+
+5. **Manejo de archivos largos**
+
+   * Mantén la división en chunks con solapamiento en `audio_processor.py`.
+   * Asegúrate que `merge_transcriptions_in_memory.py` pueda recibir la lista `(transcript, start_ms)` directamente para no depender de archivos físicos.
+
+6. **Próximos pasos para escalabilidad**
+
+   * `transcription/diarization.py` puede integrarse después de Gemini para separar hablantes automáticamente.
+   * `llm/` permite cambiar modelo de LLM sin afectar pipeline.
+   * `orchestration/runner.py` puede convertirse en la función invocada desde Cloud Run para ejecutar todo el flujo con un solo endpoint REST.
+
+---
+
+## 3️⃣ Posible refactorización de carpetas
+
+```
+src/
+├─ api/
+│  ├─ main.py
+│  └─ routes/audio_pipeline.py
+├─ domain/
+│  ├─ schemas.py
+│  └─ prompts/
+├─ ingestion/
+│  ├─ audio_processor.py      # carga, normaliza, chunking
+│  ├─ auth.py
+│  ├─ auth_service.py
+│  ├─ drive_loader.py         # descarga desde Drive a GCS
+│  └─ google_auth_manager.py
+├─ transcription/
+│  ├─ gemini_transcriber.py
+│  ├─ stt_vertex.py
+│  └─ merge_transcriptions_in_memory.py
+├─ llm/
+│  ├─ base.py
+│  ├─ vertex_client.py
+│  ├─ claude_adapter.py
+│  └─ mistral_adapter.py
+├─ storage/
+│  ├─ audio_normalizer_service.py
+│  ├─ upload_service.py
+│  ├─ gcs_cleaner.py
+│  └─ gcs_uploader.py
+├─ orchestration/
+│  ├─ runner.py
+│  └─ tasks.py
+├─ logging_conf.py
+├─ settings.py
+└─ utils/
+```
+
+**Cambios sugeridos:**
+
+* Elimina `audio_loader.py` si solo es un wrapper para AudioSegment.
+* Fusiona `drive_uploader.py` con `upload_service.py`.
+* Mantén `maintenance/` fuera del deploy de Cloud Run.
+
+---
+
+## ✅ Conclusión
+
+Actualmente tu arquitectura está **bien modularizada y lista para transcripciones largas en GCP**, solo necesitas:
+
+1. Simplificar carpetas de ingestión y storage.
+2. Centralizar pipeline en `runner.py`.
+3. Usar `merge_transcriptions_in_memory.py` para no depender de archivos físicos.
+4. Ajustar `requirements.txt` y Dockerfile para un deploy ligero.
+5. Mantener separación de `api` vs `pipeline` vs `llm` vs `storage`.
+
+---
+
+Si quieres, puedo hacer un **diagrama de flujo actualizado y sugerido** mostrando cómo los módulos deberían interactuar en esta arquitectura optimizada para transcripciones de llamadas largas, incluyendo la secuencia de:
+
+1. Descarga audio → 2. Normalización/Chunking → 3. Transcripción → 4. Merge en memoria → 5. Google Docs → 6. Limpieza.
+
+Esto te ayudaría a ver claramente qué archivos son críticos y cuáles se pueden eliminar o mover.
+
+¿Quieres que haga ese diagrama?

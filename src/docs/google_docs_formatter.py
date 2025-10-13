@@ -1,8 +1,11 @@
 # src/docs/google_docs_formatter.py (versión corregida)
+#librerias locales
 import re
 from datetime import datetime
-from src.logging_conf import get_logger
 from typing import List, Dict, Any
+
+# Módulos Globales
+from src.logging_conf import get_logger
 
 logger = get_logger(__name__)
 

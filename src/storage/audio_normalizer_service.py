@@ -1,10 +1,18 @@
 # src/storage/audio_normalizer_service.py
-from pathlib import Path
-import tempfile
-from src.logging_conf import get_logger
-from src.storage.gcs_uploader import upload_to_gcs
-from src.ingestion.audio_processor import process_mp3_to_wav16k
+
+# Librerias externas
 from google.cloud import storage
+
+# Librerias internas
+import tempfile
+from pathlib import Path
+
+# Módulos
+from src.ingestion.audio_processor import process_mp3_to_wav16k
+from src.storage.gcs_uploader import upload_to_gcs
+
+# Módulos Globales
+from src.logging_conf import get_logger
 
 logger = get_logger(__name__)
 

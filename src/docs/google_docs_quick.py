@@ -1,11 +1,19 @@
 # src/docs/google_docs_quick.py
 from __future__ import annotations
+
+#librerias externas
+from googleapiclient.errors import HttpError
+
+#librerias locales
 from typing import Dict, Any
 
-from googleapiclient.errors import HttpError
-from src.ingestion.auth import get_google_creds
-from src.logging_conf import get_logger
+# Módulos
 from src.docs.google_docs_formatter import generate_google_docs_requests
+from src.ingestion.auth import get_google_creds
+
+#Módulos Globales
+from src.logging_conf import get_logger
+
 
 logger = get_logger(__name__)
 

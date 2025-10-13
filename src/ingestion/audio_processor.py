@@ -1,14 +1,16 @@
 # src/ingestion/audio_processor.py
 from __future__ import annotations
 
-from src.logging_conf import get_logger
-
-from pathlib import Path
-from typing import Optional
-
+# Librerias externas
 from pydub import AudioSegment
 from pydub.utils import which
 
+# Librerias internas
+from pathlib import Path
+from typing import Optional
+
+# Módulos Globales
+from src.logging_conf import get_logger
 
 logger = get_logger(__name__)
 

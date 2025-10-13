@@ -1,0 +1,33 @@
+src/
+├─ api/
+│  ├─ main.py
+│  └─ routes/audio_pipeline.py
+├─ domain/
+│  ├─ schemas.py
+│  └─ prompts/
+├─ ingestion/
+│  ├─ audio_processor.py      # carga, normaliza, chunking
+│  ├─ auth.py
+│  ├─ auth_service.py
+│  ├─ drive_loader.py         # descarga desde Drive a GCS
+│  └─ google_auth_manager.py
+├─ transcription/
+│  ├─ gemini_transcriber.py
+│  ├─ stt_vertex.py
+│  └─ merge_transcriptions_in_memory.py
+├─ llm/
+│  ├─ base.py
+│  ├─ vertex_client.py
+│  ├─ claude_adapter.py
+│  └─ mistral_adapter.py
+├─ storage/
+│  ├─ audio_normalizer_service.py
+│  ├─ upload_service.py
+│  ├─ gcs_cleaner.py
+│  └─ gcs_uploader.py
+├─ orchestration/
+│  ├─ runner.py
+│  └─ tasks.py
+├─ logging_conf.py
+├─ settings.py
+└─ utils/

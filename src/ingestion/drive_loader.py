@@ -1,9 +1,14 @@
 # src/ingestion/drive_loader.py
-import re
-import io
-from pydantic import HttpUrl
-from pathlib import Path
+# Librerias externas
 from googleapiclient.http import MediaIoBaseDownload
+from pydantic import HttpUrl
+
+# Librerias internas
+import io
+import re
+from pathlib import Path
+
+# Módulo Globales
 from src.logging_conf import get_logger
 
 logger = get_logger(__name__)

@@ -1,5 +1,8 @@
 # src/storage/gcs_cleaner.py
+# Librerias externas
 from google.cloud import storage
+
+# Módulos Globales
 from src.logging_conf import get_logger
 
 logger = get_logger(__name__)

@@ -1,8 +1,13 @@
+# src/storage/gcs_uploader.py
+# Librerias externas
+from google.cloud import storage
+
+# Librerias internas
+from pathlib import Path
+
+# Módulos globales
 from src.logging_conf import get_logger
 from src.settings import GCP_PROJECT_ID, GCS_BUCKET
-
-from pathlib import Path
-from google.cloud import storage
 
 logger = get_logger(__name__)
 

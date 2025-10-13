@@ -1,9 +1,14 @@
 # src/storage/upload_service.py
-from pathlib import Path
+# Librerias internas
 import tempfile
-from src.ingestion.google_auth_manager import get_google_services
+from pathlib import Path
+
+# Módulos
 from src.ingestion.drive_loader import extract_drive_id, download_from_drive
+from src.ingestion.google_auth_manager import get_google_services
 from src.storage.gcs_uploader import upload_to_gcs
+
+# Módulos Globales
 from src.logging_conf import get_logger
 
 logger = get_logger(__name__)

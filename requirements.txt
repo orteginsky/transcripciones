@@ -1,7 +1,6 @@
 # ===============================
-# CORE AI / GOOGLE CLOUD
+# CORE GOOGLE CLOUD / AI
 # ===============================
-google-cloud-speech==2.33.0
 google-cloud-storage==2.18.2
 google-cloud-aiplatform==1.70.0
 google-generativeai==0.7.2
@@ -9,14 +8,15 @@ google-api-python-client==2.154.0
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
+google-cloud-speech==2.33.0
 
 # ===============================
-# DATA / AUTOMATION
+# API / SERVER
 # ===============================
-gspread==6.1.4
+fastapi==0.115.2
+uvicorn==0.31.1
 pydantic==2.9.2
-python-dotenv==1.0.1
-polars==1.12.0
+tenacity==9.0.0
 
 # ===============================
 # AUDIO PROCESSING
@@ -34,16 +34,8 @@ PyMuPDF==1.24.10
 Jinja2==3.1.4
 
 # ===============================
-# API / SERVER
+# DATA / AUTOMATION
 # ===============================
-fastapi==0.115.2
-uvicorn==0.31.1
-tenacity==9.0.0
-typer[all]==0.12.5
-
-# ===============================
-# DEVELOPMENT / TESTING
-# ===============================
-pytest
-black==24.10.0
-ruff==0.6.9
+gspread==6.1.4
+python-dotenv==1.0.1
+polars==1.12.0

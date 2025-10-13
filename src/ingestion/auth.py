@@ -1,9 +1,14 @@
 # src/ingestion/auth.py
-import os
+# Librerias externas
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+
+# Librerias internas
+import os
+
+# Módulos globales
 from src.logging_conf import get_logger
 from src.settings import GOOGLE_OAUTH_CREDENTIALS_FILE, GOOGLE_OAUTH_TOKEN_FILE
 

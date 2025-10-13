@@ -1,4 +1,5 @@
-# src/transcription/merge_transcriptions_in_memory.py
+# src/transcription/merge_transcriptions_in_memory.py}
+# Librerias internas
 import re
 from typing import List, Tuple
 

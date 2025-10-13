@@ -1,17 +1,23 @@
 # src/api/routes/audio_pipeline.py
+#librerias externas
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from google.cloud import storage
+
+#librerias locales
 import tempfile
 from pathlib import Path
 
-from src.transcription.gemini_transcriber import transcribe_audio_chunk
-from src.transcription.merge_transcriptions_in_memory import merge_transcriptions_in_memory
+# Módulos
+from src.docs.google_docs_quick import create_oauth_google_doc
 from src.ingestion.audio_processor import split_wav_chunks_with_overlap
-from src.storage.upload_service import save_drive_audio_to_gcs
 from src.storage.audio_normalizer_service import normalize_and_upload_gcs
 from src.storage.gcs_cleaner import delete_gcs_files
-from src.docs.google_docs_quick import create_oauth_google_doc
+from src.storage.upload_service import save_drive_audio_to_gcs
+from src.transcription.gemini_transcriber import transcribe_audio_chunk
+from src.transcription.merge_transcriptions_in_memory import merge_transcriptions_in_memory
+
+# Módulos globales
 from src.logging_conf import get_logger
 from src.settings import GCS_BUCKET
 

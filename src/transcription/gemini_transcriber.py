@@ -1,7 +1,14 @@
 # src/transcription/gemini_transcriber.py
+# Librerias externas
+import google.generativeai as genai
+
+# Librerias internas
 from pathlib import Path
-import google.generativeai as genai   # 🔑 necesario para upload_file
+
+# Módulos
 from src.ai.gemini import configure_gemini, load_model
+
+# Módulos Globales
 from src.logging_conf import get_logger
 from src.settings import TRANSCRIPTION_PROMPT_TEMPLATE
 

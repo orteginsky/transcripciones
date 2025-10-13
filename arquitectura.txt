@@ -1,17 +1,22 @@
 googlerun/
-├─ pyproject.toml
-├─ requirements.txt
-├─ README.md
 ├─ .env
 ├─ .gitignore
 ├─ Dockerfile
+├─ LICENCE
 ├─ Makefile
+├─ pyproject.toml
+├─ README.md
+├─ requirements.txt
+├─ requirements_test.txt
+├─ 
 │
 ├─ src/
+│  ├─ ai/                               # conexión con los modelos LLM
+│  │  ├─ gemini.py                      # Punto de entrada FastAPI (Cloud Run)
 │  ├─ api/                              # 🌐 Capa API REST (FastAPI)
 │  │  ├─ main.py                        # Punto de entrada FastAPI (Cloud Run)
 │  │  ├─ routes/                        
-│  │  │   ├─ audio_routes.py            # Endpoint /process-audio
+│  │  │   ├─ audio_pipeline.py          # Endpoint /process-audio
 │  │  │   └─ health.py                  # Endpoint /health
 │  │  └─ middleware/
 │  │      └─ error_handler.py           # Middleware global para logs y excepciones
@@ -23,11 +28,12 @@ googlerun/
 │  │      └─ report_prompt.md.j2        # (futuro) para análisis o reportes
 │  │
 │  ├─ ingestion/                        # 📥 Entrada de datos y descargas
-│  │  ├─ auth.py                        # Autenticación OAuth2 (Sheets/Drive)
-│  │  ├─ sheet_loader.py                # Lectura de Google Sheets
-│  │  ├─ drive_loader.py                # Descarga de archivos desde Drive
+│  │  ├─ audio_loader.py                # (opcional) carga local / preprocesamiento
 │  │  ├─ audio_processor.py             # Normalización / conversión / chunking
-│  │  └─ audio_loader.py                # (opcional) carga local / preprocesamiento
+│  │  ├─ auth.py                        # Autenticación OAuth2 (Drive)
+│  │  ├─ auth_service.py                # Autenticación (service account)
+│  │  ├─ drive_loader.py                # Descarga de archivos desde Drive
+│  │  └─ google_auth_manager.py         # Gestiona el método de Autenticación
 │  │
 │  ├─ transcription/                    # 🗣️ Transcripción de audio
 │  │  ├─ gemini_transcriber.py          # Transcripción usando Gemini
@@ -40,16 +46,25 @@ googlerun/
 │  │  ├─ claude_adapter.py
 │  │  └─ mistral_adapter.py
 │  │
+│  ├─ maintenance/                      #
+│  │  └─ limpia_drive.py                #
+│  │
 │  ├─ orchestration/                    # 🔄 Orquestación de flujos
 │  │  ├─ runner.py                      # Pipeline principal (usa audio_url en lugar de Sheets)
 │  │  └─ tasks.py                       # Subtareas (descarga, procesar, transcribir)
 │  │
 │  ├─ storage/                          # ☁️ Gestión de archivos
-│  │  ├─ gcs.py                         # Subir / eliminar en Google Cloud Storage
+│  │  ├─ audio_normalizer_service.py    # 
+│  │  ├─ drive_uploader.py              # 
+│  │  ├─ gcs_cleaner.py                 # 
+│  │  ├─ gcs_uploader.py                # 
+│  │  ├─ upload_service.py              # 
 │  │  └─ local.py                       # I/O local en /tmp
 │  │
 │  ├─ pdf/                              # 📄 Generación de informes (futuro)
+│  │  ├─ processor.py
 │  │  ├─ renderer.py
+│  │  ├─ styles.py
 │  │  └─ templates/
 │  │      └─ report.html.j2
 │  │

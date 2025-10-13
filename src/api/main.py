@@ -1,7 +1,15 @@
+# src/api/main.py
+# Librerias externas
 from fastapi import FastAPI
-from src.api.routes import audio_pipeline
-from src.logging_conf import setup_logging, get_logger
+
+# Libreria interna
 import os
+
+# Módulos
+from src.api.routes import audio_pipeline
+
+# Módulo Global
+from src.logging_conf import setup_logging, get_logger
 
 setup_logging()
 logger = get_logger(__name__)

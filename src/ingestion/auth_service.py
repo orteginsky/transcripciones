@@ -1,6 +1,9 @@
 # src/ingestion/auth_service.py
+# Librerias externas
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+# Módulos Globales
 from src.settings import GOOGLE_APPLICATION_CREDENTIALS
 from src.logging_conf import get_logger
 

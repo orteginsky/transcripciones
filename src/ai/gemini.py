@@ -1,7 +1,10 @@
 # src/ai/gemini.py
+# Librerias externas
 import google.generativeai as genai
-from src.settings import GEMINI_API_KEY
+
+# Módulos Globales
 from src.logging_conf import get_logger
+from src.settings import GEMINI_API_KEY
 
 logger = get_logger(__name__)
 
