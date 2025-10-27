@@ -37,3 +37,26 @@ def delete_gcs_files(uris: list[str]) -> list[str]:
             logger.error("❌ No se pudo eliminar %s: %s", uri, e)
 
     return deleted
+
+
+def delete_gcs_docx_files(bucket_name: str, prefix: str = "docs/") -> list[str]:
+    """
+    Elimina todos los archivos .docx del bucket (por defecto dentro del prefijo 'docs/').
+    Devuelve una lista con los archivos eliminados.
+    """
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    deleted = []
+
+    blobs = bucket.list_blobs(prefix=prefix)
+    for blob in blobs:
+        if blob.name.endswith(".docx"):
+            blob.delete()
+            deleted.append(blob.name)
+            logger.info("🧹 Eliminado .docx: %s", blob.name)
+
+    if deleted:
+        logger.info("🧾 Total de .docx eliminados: %d", len(deleted))
+    else:
+        logger.info("ℹ️ No se encontraron .docx en el bucket para eliminar.")
+    return deleted

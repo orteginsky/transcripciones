@@ -1,24 +1,25 @@
 # src/domain/schemas.py
-from pydantic import BaseModel, HttpUrl, AnyUrl
-from typing import Optional, Literal
+from __future__ import annotations
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
 
-class AudioRequest(BaseModel):
-    """
-    Modelo de entrada para procesar un registro de audio.
-    """
-    row_number: int
-    witness_name: str
-    call_date: str
-    psychologist: str
-    audio_file_link: HttpUrl
-    client_name: Optional[str] = "VAWA_Cliente"
-    testimony_type: Optional[str] = "T WS"
+class TranscriptionRequest(BaseModel):
+    case_id: str
+    title: str
+    media_link: Optional[str] = None
+    audio_link: Optional[str] = None  # retro-compat si aún lo usas en otros sitios
+    doc_id: str
+    language_code: Optional[str] = Field(default="es-ES")
+    diarization: Optional[bool] = False
+    model: Optional[str] = "latest_long"
 
-class AudioResponse(BaseModel):
-    """
-    Modelo de salida estandarizado.
-    """
-    status: Literal["success", "error"]
-    row_number: int
-    message: Optional[str] = None
-    transcript: Optional[str] = None
+class TranscriptionResponse(BaseModel):
+    case_id: str
+    title: str
+    backend: str
+    doc_id: str
+    duration_ms: int
+    timestamp: str
+
+class ErrorResponse(BaseModel):
+    error: Dict[str, Any]

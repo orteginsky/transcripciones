@@ -4,26 +4,19 @@ from src.logging_conf import get_logger
 
 logger = get_logger(__name__)
 
-def get_google_services():
+def get_drive_docs():
     """
-    Devuelve (sheets_service, drive_service, docs_service, creds).
-    Detecta si usar OAuth local o Service Account automáticamente.
+    Devuelve (drive_service, docs_service, creds).
+    Usa Service Account si GOOGLE_APPLICATION_CREDENTIALS está definida;
+    de lo contrario, usa OAuth local.
     """
-    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        try:
-            from src.ingestion.auth import get_google_creds
-            logger.info("🧑‍💻 Usando autenticación OAuth local (token.json).")
-            sheets_service, drive_service, docs_service, creds = get_google_creds()
-            return drive_service, docs_service, creds
-        except Exception as e:
-            logger.exception("Error con OAuth local: %s", e)
-            raise
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        from src.ingestion.auth_service import get_google_creds_service
+        sheets_service, drive_service, docs_service, creds = get_google_creds_service()
+        logger.info("🔐 Autenticación: Service Account")
+        return drive_service, docs_service, creds
     else:
-        try:
-            from src.ingestion.auth_service import get_google_creds_service
-            logger.info("🔐 Usando Service Account (GOOGLE_APPLICATION_CREDENTIALS).")
-            sheets_service, drive_service, docs_service, creds = get_google_creds_service()
-            return drive_service, docs_service, creds
-        except Exception as e:
-            logger.exception("Error con Service Account: %s", e)
-            raise
+        from src.ingestion.auth import get_google_creds
+        sheets_service, drive_service, docs_service, creds = get_google_creds()
+        logger.info("🧑‍💻 Autenticación: OAuth local")
+        return drive_service, docs_service, creds

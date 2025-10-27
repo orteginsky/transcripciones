@@ -1,6 +1,6 @@
 #Quitar cuando se suba a google run
-.env
-*.json
+#.env
+#*.json
 
 # Archivos de configuración de entorno virtual
 venv/

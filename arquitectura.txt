@@ -11,7 +11,7 @@ googlerun/
 ├─ 
 │
 ├─ src/
-│  ├─ ai/                               # conexión con los modelos LLM
+│  ├─ ai/                               # conexión con los modelos LLM (Replantear la ubicación de este unico módulo de ser necesario)
 │  │  ├─ gemini.py                      # Punto de entrada FastAPI (Cloud Run)
 │  ├─ api/                              # 🌐 Capa API REST (FastAPI)
 │  │  ├─ main.py                        # Punto de entrada FastAPI (Cloud Run)
@@ -20,6 +20,11 @@ googlerun/
 │  │  │   └─ health.py                  # Endpoint /health
 │  │  └─ middleware/
 │  │      └─ error_handler.py           # Middleware global para logs y excepciones
+│  │
+│  ├─ docs/                             # Replantear esto ya que el archivo doc no será generado con la aplicación sino que se tomara un enlace como entrada en la api y será sobre escrito por la cuenta de servicio SA
+│  │  ├─ google_docs_formatter.py       # generate_google_docs_requests: nserta:- Título centrado - Sello de fecha Transcripción línea a línea: * [tt] Speaker:  -> cabecera en negritas + '\n' + contenido + '\n' * [tt] [Nota: ..] -> línea única en itálica y gris * resto -> línea tal cual + '\n'
+│  │  ├─ google_docs_quick.py           # Crea un documento de Google Docs usando autenticación OAuth local,
+│  │  └─ google_docs_writer.py          # lo mismo que google_docs_quick pero no me funciono, maneja OAuth como service account
 │  │
 │  ├─ domain/                           # 🧩 Entidades y schemas (Pydantic)
 │  │  ├─ schemas.py                     # Modelos de entrada/salida API (AudioRequest, AudioResponse, etc.)
@@ -36,22 +41,26 @@ googlerun/
 │  │  └─ google_auth_manager.py         # Gestiona el método de Autenticación
 │  │
 │  ├─ transcription/                    # 🗣️ Transcripción de audio
-│  │  ├─ gemini_transcriber.py          # Transcripción usando Gemini
-│  │  ├─ stt_vertex.py                  # Transcripción usando Speech-to-Text
-│  │  └─ diarization.py                 # (futuro) separación por hablante
+│  │  ├─ gemini_transcriber.py          # Envía un fragmento de audio a Gemini para obtener transcripción.
+│  │  ├─ gemini_vertex_transcriber.py   # Transcribe un archivo de audio en GCS usando Vertex AI Gemini
+│  │  ├─ merge_transcriptions_in_memory.py  # Une las transcripciones de los fragmentos, ajustando timestamps.
+│  │  ├─ merge_transcriptions.py        # Unifica las transcripciones de los fragmentos, ajustando las marcas de tiempo y los hablantes.
+│  │  ├─ stt_batch.py                   # Transcribe audio en GCS usando BatchRecognize de Speech-to-Text v2.
+│  │  ├─ stt_vertex.py                  # Transcribe un archivo WAV 16 kHz mono usando Speech-to-Text v2.
+│  │  └─ diarization.py                 # Módulo inexistente
 │  │
 │  ├─ llm/                              # 🧠 Clientes de modelos LLM (vía Vertex)
-│  │  ├─ base.py
-│  │  ├─ vertex_client.py
-│  │  ├─ claude_adapter.py
-│  │  └─ mistral_adapter.py
+│  │  ├─ base.py                        # vacio
+│  │  ├─ vertex_client.py               # 
+│  │  ├─ claude_adapter.py              # vacio
+│  │  └─ mistral_adapter.py             # vacio
 │  │
 │  ├─ maintenance/                      #
-│  │  └─ limpia_drive.py                #
+│  │  └─ limpia_drive.py                # Limpia los audios subidos al bucket pero falta u otro módulo que limpie los txt que genera de la transcripción o dentro de este que se incorpore
 │  │
 │  ├─ orchestration/                    # 🔄 Orquestación de flujos
 │  │  ├─ runner.py                      # Pipeline principal (usa audio_url en lugar de Sheets)
-│  │  └─ tasks.py                       # Subtareas (descarga, procesar, transcribir)
+│  │  └─ tasks.py                       # Subtareas (descarga, procesar, transcribir) pero esta vacio
 │  │
 │  ├─ storage/                          # ☁️ Gestión de archivos
 │  │  ├─ audio_normalizer_service.py    # 
@@ -61,7 +70,7 @@ googlerun/
 │  │  ├─ upload_service.py              # 
 │  │  └─ local.py                       # I/O local en /tmp
 │  │
-│  ├─ pdf/                              # 📄 Generación de informes (futuro)
+│  ├─ pdf/                              # 📄 Generación de informes (NO LO OCUPO YA QUE TODO ES CON GOOGLE DOCS)
 │  │  ├─ processor.py
 │  │  ├─ renderer.py
 │  │  ├─ styles.py
@@ -72,11 +81,6 @@ googlerun/
 │  ├─ settings.py                       # Configuración global y lectura de .env
 │  └─ utils/                            # Funciones auxiliares (ej. timestamps, text cleaning)
 │
-├─ tests/
-│  ├─ test_auth.py
-│  ├─ test_runner_integration.py
-│  ├─ test_transcription_gemini.py
-│  └─ test_api_audio.py                 # Test real del endpoint /process-audio
 │
 └─ data/
    ├─ input/

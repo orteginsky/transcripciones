@@ -60,6 +60,32 @@ else:
 
 SERVICE_ACCOUNT_SANDBOX_FOLDER = Path(os.getenv("SERVICE_ACCOUNT_SANDBOX_FOLDER", "credencial"))
 
+# src/settings.py (al final del archivo añade esto)
+class _S:
+    # Tip: clase simple para transportar settings a otros módulos
+    project_id: str | None
+    gcp_project_id: str | None
+    vertex_location: str | None
+    gemini_api_key: str | None
+    transcriber: str | None
+    gcp_region: str | None
+    speech_recognizer: str | None
+    stt_language_code: str
+    stt_enable_diarization: bool
+
+def get_settings() -> _S:
+    s = _S()
+    s.project_id = GCP_PROJECT_ID
+    s.gcp_project_id = GCP_PROJECT_ID       # 👈 alias explícito
+    s.vertex_location = GCP_REGION
+    s.gcp_region = GCP_REGION               # 👈 alias explícito
+    s.gemini_api_key = GEMINI_API_KEY
+    s.transcriber = os.getenv("TRANSCRIBER", "stt_v2")
+    s.speech_recognizer = os.getenv("SPEECH_RECOGNIZER", "")
+    s.stt_language_code = STT_LANGUAGE_CODE
+    s.stt_enable_diarization = STT_ENABLE_DIARIZATION
+    return s
+
 
 if __name__=="__main__":
     print(TRANSCRIPTION_PROMPT_FILE)

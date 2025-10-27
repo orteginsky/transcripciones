@@ -117,11 +117,3 @@ Actualmente tu arquitectura está **bien modularizada y lista para transcripcion
 5. Mantener separación de `api` vs `pipeline` vs `llm` vs `storage`.
 
 ---
-
-Si quieres, puedo hacer un **diagrama de flujo actualizado y sugerido** mostrando cómo los módulos deberían interactuar en esta arquitectura optimizada para transcripciones de llamadas largas, incluyendo la secuencia de:
-
-1. Descarga audio → 2. Normalización/Chunking → 3. Transcripción → 4. Merge en memoria → 5. Google Docs → 6. Limpieza.
-
-Esto te ayudaría a ver claramente qué archivos son críticos y cuáles se pueden eliminar o mover.
-
-¿Quieres que haga ese diagrama?
