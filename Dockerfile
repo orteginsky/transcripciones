@@ -1,22 +1,39 @@
+# ---------------------------------------------------------
+# Dockerfile - Transcripciones (FastAPI) - Python 3.11 slim
+# Imagen ligera, sin root, uvicorn como servidor
+# ---------------------------------------------------------
 FROM python:3.11-slim
 
-# Establece el directorio de trabajo
+# Ergonomía / rendimiento
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    PYTHONPATH=/app
+
+# (Si usarás /api/transcribe-video) instala ffmpeg
+# Si no lo necesitas todavía, borra ffmpeg para una imagen aún más chica.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copia los archivos de requerimientos e instala las dependencias
-# Se usa --no-cache-dir para reducir el tamaño de la imagen
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
-
+# 1) Dependencias (mejor cache)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
 
-# Copia el código fuente de tu aplicación
-COPY .env .env
+# 2) Código
 COPY src ./src
-COPY credentials ./credentials
-RUN mkdir -p /app/data/work
-# Cloud Run automáticamente expone el puerto que escucha el contenedor.
-# Tu aplicación debe escuchar en el puerto especificado por la variable de entorno $PORT.
-# Se usa 0.0.0.0 para que el servidor escuche en todas las interfaces de red.
-ENV PORT=8080
-CMD uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
+
+COPY data ./data
+
+# 3) Usuario no-root
+RUN useradd -u 1001 -m appuser
+USER 1001
+
+# 4) Expose opcional (Cloud Run no lo requiere)
+EXPOSE 8080
+
+# 5) Arranque (Cloud Run inyecta $PORT)
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
