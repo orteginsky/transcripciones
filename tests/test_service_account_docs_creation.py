@@ -1,5 +1,5 @@
 # tests/test_service_account_docs_creation.py
-from src.ingestion.google_auth_manager import get_google_services
+from src.ingestion.auth_service import get_google_creds_service
 from googleapiclient.discovery import build
 
 if __name__ == "__main__":
@@ -7,7 +7,7 @@ if __name__ == "__main__":
     
     print("🤖 Probando creación de documento con Service Account...")
 
-    drive_service, docs_service, creds = get_google_services()
+    drive_service, docs_service, creds = get_google_creds_service()
     docs_service = build("docs", "v1", credentials=creds)
 
     # 1️⃣ Crear el archivo DOCS directamente en Drive

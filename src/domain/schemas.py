@@ -1,7 +1,9 @@
 # src/domain/schemas.py
 from __future__ import annotations
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
+
+TranscriberLiteral = Literal["gemini_vertex", "stt_v2"]  # amplía en el futuro
 
 class TranscriptionRequest(BaseModel):
     case_id: str
@@ -12,6 +14,7 @@ class TranscriptionRequest(BaseModel):
     language_code: Optional[str] = Field(default="es-ES")
     diarization: Optional[bool] = False
     model: Optional[str] = "latest_long"
+    transcriber: Optional[TranscriberLiteral] = None  # 👈 nuevo (override opcional)
 
 class TranscriptionResponse(BaseModel):
     case_id: str

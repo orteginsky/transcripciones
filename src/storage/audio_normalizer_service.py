@@ -16,36 +16,72 @@ from src.logging_conf import get_logger
 
 logger = get_logger(__name__)
 
-def normalize_and_upload_gcs(mp3_gcs_uri: str, case_id: str, bucket_name: str | None) -> str:
+def normalize_and_upload_gcs(
+    gcs_src_uri: str,
+    case_id: str,
+    bucket_name: str,
+    *,
+    target_sr: int | None = None,
+    target_channels: int = 1,
+    target_format: str = "wav",   # "wav" | "flac"
+    auto_sr: bool = False,        # si True: usa 8k si la fuente es <=12k (telefónico), si no 16k
+) -> str:
     """
-    Descarga un MP3 de GCS, lo normaliza a WAV 16kHz mono PCM16, y lo vuelve a subir.
-    Retorna la nueva URI gs:// del archivo WAV.
+    Descarga desde GCS, normaliza a mono y sample rate objetivo, exporta en target_format y sube a GCS.
+    Devuelve la URI gs:// del archivo normalizado.
     """
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
+    import tempfile, os
+    from google.cloud import storage
+    from pydub import AudioSegment
 
-    # --- 1️⃣ Parsear ruta GCS ---
-    assert mp3_gcs_uri.startswith("gs://"), "La URI debe iniciar con gs://"
-    _, path = mp3_gcs_uri.replace("gs://", "").split("/", 1)
-    blob = bucket.blob(path)
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
 
-    # --- 2️⃣ Crear directorio temporal ---
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        local_mp3 = tmpdir_path / f"{case_id}.mp3"
-        local_wav = tmpdir_path / f"{case_id}_16k.wav"
+    if not gcs_src_uri.startswith("gs://"):
+        raise ValueError("gcs_src_uri inválido")
 
-        # --- 3️⃣ Descargar MP3 ---
-        logger.info("Descargando MP3 desde %s", mp3_gcs_uri)
-        blob.download_to_filename(local_mp3)
+    src_bucket, src_blob = gcs_src_uri.replace("gs://", "").split("/", 1)
 
-        # --- 4️⃣ Normalizar y convertir ---
-        logger.info("Normalizando y convirtiendo a WAV 16kHz")
-        process_mp3_to_wav16k(local_mp3, tmpdir_path, out_name=local_wav.name)
+    with tempfile.TemporaryDirectory() as td:
+        local_in = os.path.join(td, "in.bin")
+        storage_client.bucket(src_bucket).blob(src_blob).download_to_filename(local_in)
+        logger.info("📥 Descargado para normalizar: %s", gcs_src_uri)
 
-        # --- 5️⃣ Subir WAV al bucket ---
-        wav_destination = f"processed/{case_id}_16k.wav"
-        wav_uri = upload_to_gcs(local_wav, bucket_name, destination=wav_destination)
+        audio = AudioSegment.from_file(local_in)
+        orig_sr = int(audio.frame_rate or 0)
 
-        logger.info("Archivo WAV subido: %s", wav_uri)
-        return wav_uri
+        # Elegir SR destino
+        if target_sr is None:
+            if auto_sr:
+                # Si la fuente es 12k o menos (típico telefónico 8k), usa 8k; si no, 16k
+                target_sr = 8000 if (orig_sr and orig_sr <= 12000) else 16000
+            else:
+                target_sr = 16000
+
+        audio = audio.set_frame_rate(target_sr).set_channels(target_channels)
+
+        # Exportar
+        stem = os.path.splitext(os.path.basename(src_blob))[0]
+        if target_format == "flac":
+            local_out = os.path.join(td, f"{stem}_{target_sr}.flac")
+            content_type = "audio/flac"
+            audio.export(local_out, format="flac")
+        else:
+            local_out = os.path.join(td, f"{stem}_{target_sr}.wav")
+            content_type = "audio/wav"
+            audio.export(local_out, format="wav")
+
+        dest_name = f"processed/{os.path.basename(local_out)}"
+        blob = bucket.blob(dest_name)
+
+        # Sube con chunk grande (puedes ajustar por env)
+        try:
+            chunk_mb = int(os.getenv("GCS_UPLOAD_CHUNK_MB", "64"))
+            blob.chunk_size = chunk_mb * 1024 * 1024
+        except Exception:
+            pass
+
+        blob.upload_from_filename(local_out, content_type=content_type)
+        gcs_out = f"gs://{bucket_name}/{dest_name}"
+        logger.info("✅ Normalizado y subido: %s", gcs_out)
+        return gcs_out

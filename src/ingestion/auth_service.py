@@ -27,11 +27,11 @@ def get_google_creds_service():
             GOOGLE_APPLICATION_CREDENTIALS,
             scopes=SCOPES,
         )
-        sheets_service = build("sheets", "v4", credentials=creds)
-        drive_service = build("drive", "v3", credentials=creds)
-        docs_service = build("docs", "v1", credentials=creds)
+        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        docs_service  = build("docs",  "v1", credentials=creds, cache_discovery=False)
+
         logger.info("Autenticación con service account exitosa.")
-        return sheets_service, drive_service, docs_service, creds
+        return drive_service, docs_service, creds
     except Exception as e:
         logger.exception("Error autenticando con service account: %s", e)
         raise

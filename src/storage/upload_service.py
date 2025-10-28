@@ -5,7 +5,7 @@ from pathlib import Path
 
 # Módulos
 from src.ingestion.drive_loader import extract_drive_id, download_from_drive
-from src.ingestion.google_auth_manager import get_google_services
+from src.ingestion.auth_service import get_google_creds_service
 from src.storage.gcs_uploader import upload_to_gcs
 
 # Módulos Globales
@@ -18,7 +18,7 @@ def save_drive_audio_to_gcs(audio_link: str, case_id: str) -> str:
     Descarga un audio desde Google Drive y lo sube al bucket GCS.
     Retorna la URI final gs://...
     """
-    drive_service, _, _ = get_google_services()
+    drive_service, _, _ = get_google_creds_service()
     file_id = extract_drive_id(audio_link)
 
     if not file_id:
@@ -33,5 +33,8 @@ def save_drive_audio_to_gcs(audio_link: str, case_id: str) -> str:
         # 2️⃣ Subir a GCS
         gcs_uri = upload_to_gcs(local_path)
 
-        logger.info("Audio subido correctamente a: %s", gcs_uri)
-        return gcs_uri
+        if gcs_uri:
+            logger.info("Audio subido correctamente a: %s", gcs_uri)
+            return gcs_uri
+        else:
+            return ""

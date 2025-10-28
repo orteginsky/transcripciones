@@ -8,6 +8,7 @@ from google.api_core.exceptions import ServiceUnavailable
 from pathlib import Path
 from typing import Optional
 import time
+import os
 
 # Módulos internos
 from src.logging_conf import get_logger
@@ -42,19 +43,19 @@ def upload_to_gcs(
     destination_blob = destination or local_path.name
 
     blob = bucket.blob(destination_blob)
-
     # Habilitar "resumable upload" para archivos grandes
-    blob.chunk_size = CHUNK_SIZE
+    # Usa env si está definido (tiene prioridad), si no el default CHUNK_SIZE
+    env_chunk_mb = os.getenv("GCS_UPLOAD_CHUNK_MB")
+    blob.chunk_size = (int(env_chunk_mb) * 1024 * 1024) if env_chunk_mb else CHUNK_SIZE
 
     logger.info(
         "🚀 Subiendo a GCS: %s → gs://%s/%s (chunk=%dMB, timeout=%ds)",
         local_path,
         bucket_name,
         destination_blob,
-        CHUNK_SIZE // (1024 * 1024),
+        blob.chunk_size // (1024 * 1024),
         UPLOAD_TIMEOUT,
     )
-
     # Reintentos simples con backoff exponencial
     for attempt in range(1, MAX_RETRIES + 1):
         try:

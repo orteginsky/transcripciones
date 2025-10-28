@@ -33,7 +33,7 @@ def _ensure_recognizer(
     project_id: Optional[str],
     location: str = "global",
     recognizer_id: str = "default-stt",
-    language: str = "es-MX",
+    language_code: str = "es-MX",
     model: str = "long",
     enable_diarization: bool = False,
 ) -> Optional[str]:
@@ -53,9 +53,16 @@ def _ensure_recognizer(
         display_name="Default STT (auto)",
         default_recognition_config=speech_v2.RecognitionConfig(
             auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
-            language_codes=[language],
+            language_codes=[language_code],
             model=model,
-            features=speech_v2.RecognitionFeatures(enable_automatic_punctuation=True),
+            features=speech_v2.RecognitionFeatures(
+                enable_automatic_punctuation=True,
+                diarization_config=(
+                    speech_v2.SpeakerDiarizationConfig(
+                        min_speaker_count=2, max_speaker_count=2
+                    ) if enable_diarization else None
+                ),
+            ),
         ),
     )
 
@@ -70,6 +77,7 @@ def _ensure_recognizer(
     return None
 
 
+
 # ================================================================
 # GEMINI VIA AI STUDIO (API KEY)
 # ================================================================
@@ -80,6 +88,7 @@ def gemini_transcribe_gcs(
     model_name: str = "gemini-2.0-flash",
     prompt: Optional[str] = None,
     mime_type: str = "audio/wav",
+    language_code: Optional[str] = None,
 ) -> str:
     """Transcribe un archivo desde GCS usando Google Generative AI (API key)."""
     import google.generativeai as genai
@@ -92,27 +101,26 @@ def gemini_transcribe_gcs(
     genai.configure(api_key=s.gemini_api_key)
     model = genai.GenerativeModel(model_name=model_name, generation_config={"temperature": 0.0})
 
-    # Prompt
-    system_prompt = (
+    # Prompt con pista de idioma
+    lang = language_code or getattr(s, "stt_language_code", None) or "es-ES"
+    base_prompt = (
         prompt
         or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None)
-        or "Transcribe fielmente el audio en español (sin parafrasear)."
+        or "Transcribe fielmente el audio (sin parafrasear)."
     )
+    system_prompt = f"{base_prompt}\n\nIdioma objetivo: {lang}. No traduzcas; conserva el idioma original del audio."
 
     if not gcs_wav_uri.startswith("gs://"):
         raise ValueError(f"URI inválida: {gcs_wav_uri}")
 
-    # Descarga temporal
     bucket_name, blob_name = gcs_wav_uri.replace("gs://", "").split("/", 1)
     tmp_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
     storage.Client().bucket(bucket_name).blob(blob_name).download_to_filename(tmp_path)
     logger.info("📥 Archivo descargado temporalmente desde GCS: %s", tmp_path)
 
-    # Subida al endpoint (usando upload_file clásico)
     uploaded = genai.upload_file(tmp_path, mime_type=mime_type)
     logger.info("📤 Archivo subido a AI Studio: %s", uploaded.name)
 
-    # Generar transcripción
     resp = model.generate_content(
         [
             {"role": "user", "parts": [{"text": system_prompt}]},
@@ -129,7 +137,6 @@ def gemini_transcribe_gcs(
 
     return text
 
-
 # ================================================================
 # GEMINI VIA VERTEX AI (SERVICE ACCOUNT)
 # ================================================================
@@ -140,6 +147,7 @@ def gemini_vertex_transcribe_gcs(
     model_name: str = "gemini-2.0-flash",
     mime_type: str = "audio/wav",
     system_prompt: str | None = None,
+    language_code: Optional[str] = None,
 ) -> str:
     """Transcribe un archivo de audio directamente desde GCS usando Vertex AI Gemini."""
     import vertexai
@@ -154,15 +162,16 @@ def gemini_vertex_transcribe_gcs(
 
     vertexai.init(project=project_id, location=region)
 
-    # Prompt
-    prompt_text = system_prompt or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None)
-    if not prompt_text:
-        prompt_text = (
-            "Transcribe fielmente el audio en español (sin parafrasear). "
+    lang = language_code or getattr(s, "stt_language_code", None) or "es-ES"
+    base_prompt = system_prompt or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None)
+    if not base_prompt:
+        base_prompt = (
+            "Transcribe fielmente el audio (sin parafrasear). "
             "Usa puntuación básica y marca lo inaudible como [Nota: inaudible]."
         )
+    prompt_text = f"{base_prompt}\n\nIdioma objetivo: {lang}. No traduzcas; conserva el idioma original del audio."
 
-    logger.info("🧠 Usando prompt personalizado (%d chars): %.200s...", len(prompt_text), prompt_text)
+    logger.info("🧠 Prompt (%d chars): %.200s...", len(prompt_text), prompt_text)
 
     model = GenerativeModel(model_name)
     audio_part = Part.from_uri(gcs_wav_uri, mime_type=mime_type)
@@ -181,14 +190,16 @@ def stt_v2_transcribe_gcs(
     gcs_wav_uri: str,
     *,
     language: str | None = None,
+    language_code: str | None = None,
     diarization: bool | None = None,
     model: str = "long",
     automatic_punctuation: bool = True,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
 ) -> str:
+    """Reconocimiento síncrono con alias language_code."""
     s = get_settings()
-    language = language or s.stt_language_code or "es-MX"
+    lang = language_code or language or s.stt_language_code or "es-MX"
     diarization = bool(s.stt_enable_diarization if diarization is None else diarization)
     min_speakers = min_speakers or int(os.getenv("STT_MIN_SPEAKERS", "2"))
     max_speakers = max_speakers or int(os.getenv("STT_MAX_SPEAKERS", "2"))
@@ -204,14 +215,14 @@ def stt_v2_transcribe_gcs(
             project_id=s.project_id,
             location=location,
             recognizer_id="default-stt",
-            language=language,
+            language_code=lang,
             model=model,
             enable_diarization=False,
         )
 
     logger.info(
         "STT v2 | endpoint=%s | recognizer=%s | lang=%s | diarization=%s",
-        location, recognizer, language, diarization,
+        location, recognizer, lang, diarization,
     )
 
     feats = speech_v2.RecognitionFeatures(
@@ -226,7 +237,7 @@ def stt_v2_transcribe_gcs(
 
     config = speech_v2.RecognitionConfig(
         auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
-        language_codes=[language],
+        language_codes=[lang],
         model=model,
         features=feats,
     )
@@ -245,7 +256,7 @@ def stt_v2_transcribe_gcs(
             project_id=s.project_id,
             location=location,
             recognizer_id="default-stt",
-            language=language,
+            language_code=lang,
             model=model,
         )
         resp = client.recognize(
@@ -268,26 +279,34 @@ def stt_v2_transcribe_gcs(
 # FACADE PRINCIPAL
 # ================================================================
 
-def transcribe_from_gcs_uri(gcs_wav_uri: str, prompt: str | None = None) -> str:
-    """Selecciona el backend configurado y ejecuta la transcripción."""
+def transcribe_from_gcs_uri(
+    gcs_wav_uri: str,
+    *,
+    language_code: Optional[str] = None,
+    prompt: Optional[str] = None,
+) -> str:
+    """Selecciona el backend configurado y ejecuta la transcripción (con language_code)."""
     s = get_settings()
     backend = (s.transcriber or "stt_v2").lower()
+    lang = language_code or getattr(s, "stt_language_code", None) or "es-MX"
 
     if backend == "gemini_vertex":
         return gemini_vertex_transcribe_gcs(
             gcs_wav_uri,
             system_prompt=prompt or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None),
+            language_code=lang,
         )
 
     if backend == "gemini":
         return gemini_transcribe_gcs(
             gcs_wav_uri,
             prompt=prompt or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None),
+            language_code=lang,
         )
 
     return stt_v2_transcribe_gcs(
         gcs_wav_uri,
-        language=s.stt_language_code,
+        language_code=lang,
         diarization=s.stt_enable_diarization,
     )
 
@@ -295,6 +314,7 @@ def stt_v2_transcribe_gcs_lro(
     gcs_wav_uri: str,
     *,
     language: str | None = None,
+    language_code: str | None = None,
     diarization: bool | None = None,
     model: str = "long",
     automatic_punctuation: bool = True,
@@ -302,12 +322,12 @@ def stt_v2_transcribe_gcs_lro(
     min_speakers: int | None = None,
     max_speakers: int | None = None,
 ) -> str:
-    """BatchRecognize para audios largos (LRO = Long Running Operation)."""
+    """BatchRecognize para audios largos (LRO) con alias language_code."""
     from google.cloud import speech_v2
     from google.api_core import exceptions as gexc
 
     s = get_settings()
-    language = language or s.stt_language_code or "es-MX"
+    lang = language_code or language or s.stt_language_code or "es-MX"
     diarization = bool(s.stt_enable_diarization if diarization is None else diarization)
     min_speakers = min_speakers or int(os.getenv("STT_MIN_SPEAKERS", "2"))
     max_speakers = max_speakers or int(os.getenv("STT_MAX_SPEAKERS", "2"))
@@ -318,7 +338,7 @@ def stt_v2_transcribe_gcs_lro(
         project_id=s.project_id,
         location=location,
         recognizer_id="default-stt",
-        language=language,
+        language_code=lang,
         model=model,
     )
 
@@ -334,7 +354,7 @@ def stt_v2_transcribe_gcs_lro(
 
     config = speech_v2.RecognitionConfig(
         auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
-        language_codes=[language],
+        language_codes=[lang],
         model=model,
         features=feats,
     )
@@ -353,10 +373,14 @@ def stt_v2_transcribe_gcs_lro(
     response = op.result(timeout=timeout_sec)
 
     parts: list[str] = []
-    for result in response.results:
-        if result.alternatives:
-            parts.append(result.alternatives[0].transcript.strip())
+    if response:
+        for result in response.results:
+            if result.alternatives:
+                parts.append(result.alternatives[0].transcript.strip())
 
-    text = "\n".join(p for p in parts if p).strip()
-    logger.info("✅ LRO completado (%d caracteres)", len(text))
-    return text
+        text = "\n".join(p for p in parts if p).strip()
+        logger.info("✅ LRO completado (%d caracteres)", len(text))
+        return text
+    else:
+        logger.info("result esta vacio")
+        return ""
