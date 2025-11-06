@@ -26,3 +26,14 @@ class TranscriptionResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: Dict[str, Any]
+
+class TranscribeAndDriveRequest(BaseModel):
+    case_id: str
+    title: str
+    media_link: str          # enlace de Drive al audio (como en el endpoint actual)
+    doc_id: str              # ID del Google Doc destino (para humanos)
+    drive_folder_id: str     # ID de la carpeta de Drive donde guardar el .txt
+    language_code: Optional[str] = None
+    diarization: Optional[bool] = None
+    model: Optional[str] = None
+    transcriber: Optional[str] = None

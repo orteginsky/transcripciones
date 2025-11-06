@@ -42,3 +42,4 @@ polars==1.12.0
 
 prometheus-client
 prometheus-fastapi-instrumentator
+httplib2>=0.22.0

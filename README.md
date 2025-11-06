@@ -48,6 +48,214 @@ src/
   settings.py
 ```
 
+## 🧠 Arquitectura
+
+### 1) Vista general (flujo funcional)
+
+```mermaid
+%% 1) Vista general (flujo funcional) — ajustado a módulos reales
+sequenceDiagram
+    autonumber
+    participant U as Cliente (Thunder/Apps Script)
+    participant API as FastAPI (Cloud Run, /api/transcribe)
+    participant CFG as src/settings.py (Pydantic)
+    participant DR as Google Drive API
+    participant GCS as Cloud Storage (gs://my-bucket-out)
+    participant AU as storage/audio_normalizer_service.py
+    participant SP as Speech-to-Text v2
+    participant V as Vertex AI (Gemini/Claude)
+    participant GD as Google Docs API
+    participant GO as Google Doc destino
+
+    Note over U,API: POST {case_id, media_link o video_link, doc_id, overrides}
+    U->>API: /api/transcribe (audio) / /api/transcribe-video (video)
+
+    Note over API,CFG: 1) Carga/validación de configuración
+    API->>CFG: Leer env (GCS_BUCKET, TRANSCRIBER, STT_*, PROMPT_FILE, ...)
+    CFG-->>API: OK (no-vacíos)
+
+    Note over API,DR: 2) Descarga desde Drive
+    API->>DR: download_from_drive(media_link) (ingestion/drive_loader.py)
+    DR-->>API: archivo local (mp3/mp4)
+
+    Note over API,GCS: 3) Subida base a GCS
+    API->>GCS: upload_to_gcs(...) (storage/upload_service.py)
+    GCS-->>API: gs://.../mp3/...
+
+    Note over API,AU: 4) (Opcional) Normalización/segmentación
+    API->>AU: a wav16k/flac (storage/audio_normalizer_service.py)
+    AU-->>API: gs://.../wav16k|flac/...
+
+    Note over API,V: 5) Transcripción
+    API->>API: Seleccionar backend (header/body/env)
+    alt Backend: gemini vertex
+        API->>V: generateContent(audio + prompt) (transcription/transcribers.py)
+        V-->>API: transcript (texto crudo)
+    else Backend: stt v2
+        API->>SP: Recognize (LRO) sobre wav16k|flac (transcription/transcribers.py)
+        SP-->>API: transcript (texto + opcional diarización)
+    end
+
+    Note over API,V: 6) Post-proceso/format (prompt)
+    API->>V: aplicar TRANSCRIPTION_PROMPT_FILE (si procede)
+    V-->>API: texto final
+
+    Note over API,GD: 7) Escritura al Google Doc
+    API->>GD: batchUpdate(deleteAll + insertTop) (docs/google_docs_service.py)
+    GD-->>API: OK (estilos por docs/google_docs_formatter.py)
+
+    Note over API,GCS: 8) Artefactos a GCS
+    API->>GCS: guardar .txt/.json en gs://.../audio_output/<case_id>/
+    GCS-->>API: OK
+
+    Note over API,U: 9) Respuesta y métricas
+    API-->>U: {status, doc_link, gcs_paths, backend, timing}
+
+```
+
+### 2) Vista técnica (módulos y dependencias)
+
+```mermaid
+%% 2) Vista técnica (módulos y dependencias) — mapeo 1:1 con Estructura clave
+graph LR
+  %% --- Capas internas ---
+  subgraph API["Capa API"]
+    M[[src/api/main.py]]
+    RA[[src/api/routes/audio_pipeline.py]]
+    RV[[src/api/routes/video_pipeline.py]]
+    EH[[src/api/middleware/error_handler.py]]
+  end
+
+  subgraph ORQ["Orquestación"]
+    RUN[[src/orchestration/runner.py]]
+  end
+
+  subgraph ING["Ingesta (Drive/Video)"]
+    DL[[src/ingestion/drive_loader.py]]
+    VAU[[src/ingestion/video_audio.py]]
+    GAM[[src/ingestion/google_auth_manager.py]]
+  end
+
+  subgraph STR["Storage / Audio"]
+    UP[[src/storage/upload_service.py]]
+    GU[[src/storage/gcs_uploader.py]]
+    GC[[src/storage/gcs_cleaner.py]]
+    AN[[src/storage/audio_normalizer_service.py]]
+  end
+
+  subgraph TRN["Transcripción"]
+    TR[[src/transcription/transcribers.py]]
+  end
+
+  subgraph DOCS["Google Docs"]
+    GDF[[src/docs/google_docs_formatter.py]]
+    GDS[[src/docs/google_docs_service.py]]
+  end
+
+  subgraph CORE["Core / Infra"]
+    AS[[src/ingestion/auth_service.py]]
+    ST[[src/settings.py]]
+    LG[[src/logging_conf.py]]
+    MT[[src/metrics.py]]
+    RC[[src/recognizer.py]]
+  end
+
+  %% Relaciones internas
+  M --> RA
+  M --> RV
+  RA --> RUN
+  RV --> RUN
+  EH --> M
+
+  RUN --> DL
+  RUN --> VAU
+  RUN --> UP
+  RUN --> GU
+  RUN --> GC
+  RUN --> AN
+  RUN --> TR
+  RUN --> GDS
+  RUN --> GDF
+
+  DL --> GAM
+  GDS --> GDF
+
+  %% Core deps
+  RA --> ST
+  RV --> ST
+  RUN --> ST
+  DL --> ST
+  TR --> ST
+  UP --> ST
+  AN --> ST
+  GDS --> ST
+  GDF --> ST
+
+  RA --> LG
+  RV --> LG
+  RUN --> LG
+  TR --> LG
+  GDS --> LG
+  UP --> LG
+  AN --> LG
+  DL --> LG
+  MT --> LG
+
+  %% --- Servicios externos ---
+  subgraph EXT["Servicios Externos"]
+    CR[[Cloud Run]]
+    SA[[Service Account: drive-sheets@...]]
+    AR[[Artifact Registry]]
+    CL[[Cloud Logging]]
+    GCS[(Cloud Storage)]
+    DRV[(Google Drive API)]
+    GDA[(Google Docs API)]
+    STT[(Speech-to-Text v2)]
+    VTX[(Vertex AI Gemini/Claude)]
+  end
+
+  %% Conexiones externas
+  M -. despliegue .-> CR
+  CR -. usa .-> SA
+  AR -. imagen .-> CR
+  LG --> CL
+
+  UP --> GCS
+  GU --> GCS
+  GC --> GCS
+  AN --> GCS
+
+  DL --> DRV
+  GDS --> GDA
+
+  TR --> STT
+  TR --> VTX
+  AS -. credenciales/ADC .- CR
+  AS -. scopes .- DRV
+  AS -. scopes .- GDA
+  AS -. scopes .- GCS
+
+  %% Estilos
+  classDef api fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
+  classDef orq fill:#e8f5e9,stroke:#43a047,color:#1b5e20
+  classDef ing fill:#fff8e1,stroke:#f9a825,color:#f57f17
+  classDef str fill:#ede7f6,stroke:#5e35b1,color:#311b92
+  classDef trn fill:#f1f8e9,stroke:#7cb342,color:#33691e
+  classDef docs fill:#fff3e0,stroke:#fb8c00,color:#e65100
+  classDef core fill:#f3e5f5,stroke:#8e24aa,color:#4a148c
+  classDef ext fill:#eceff1,stroke:#607d8b,color:#37474f
+
+  class M,RA,RV,EH api
+  class RUN orq
+  class DL,VAU,GAM ing
+  class UP,GU,GC,AN str
+  class TR trn
+  class GDF,GDS docs
+  class AS,ST,LG,MT,RC core
+  class CR,SA,AR,CL,GCS,DRV,GDA,STT,VTX ext
+
+```
+
 ---
 
 ## ⚙️ Prerrequisitos

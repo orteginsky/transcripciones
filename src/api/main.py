@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 
 from src.api.routes import audio_pipeline
 from src.api.middleware.error_handler import register_exception_handlers
+from src.api.routes import transcribe_drive as transcribe_drive_router
 from src.logging_conf import setup_logging, get_logger
 
 # 👇 Prometheus (ya instalado)
@@ -65,3 +66,6 @@ def whoami():
             status_code=500,
             content={"error": {"code": "INTERNAL", "message": "Unable to determine principal", "details": {"reason": str(e)}}}
         )
+
+
+app.include_router(transcribe_drive_router.router)
