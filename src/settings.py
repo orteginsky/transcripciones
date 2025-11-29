@@ -88,10 +88,12 @@ def get_settings() -> _S:
 
 
 if __name__=="__main__":
+    algo = get_settings()
     print(TRANSCRIPTION_PROMPT_FILE)
     print(TRANSCRIPTION_PROMPT_TEMPLATE)
     print(GOOGLE_APPLICATION_CREDENTIALS)
     print(GOOGLE_OAUTH_CREDENTIALS_FILE)
     print(GOOGLE_OAUTH_TOKEN_FILE)
     print(SERVICE_ACCOUNT_SANDBOX_FOLDER)
+    print(algo.stt_enable_diarization)
 
