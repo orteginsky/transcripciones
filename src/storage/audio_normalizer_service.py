@@ -1,17 +1,8 @@
 # src/storage/audio_normalizer_service.py
-
-# Librerias externas
-from google.cloud import storage
-
-# Librerias internas
+import os
 import tempfile
-from pathlib import Path
-
-# Módulos
-from src.ingestion.audio_processor import process_mp3_to_wav16k
-from src.storage.gcs_uploader import upload_to_gcs
-
-# Módulos Globales
+from google.cloud import storage
+from pydub import AudioSegment
 from src.logging_conf import get_logger
 
 logger = get_logger(__name__)
@@ -22,46 +13,93 @@ def normalize_and_upload_gcs(
     bucket_name: str,
     *,
     target_sr: int | None = None,
-    target_channels: int = 1,
-    target_format: str = "wav",   # "wav" | "flac"
-    auto_sr: bool = False,        # si True: usa 8k si la fuente es <=12k (telefónico), si no 16k
+    target_channels: int | None = None,
+    target_format: str = "flac",
+    auto_sr: bool = False,
+    force_normalize: bool = True,
 ) -> str:
     """
-    Descarga desde GCS, normaliza a mono y sample rate objetivo, exporta en target_format y sube a GCS.
-    Devuelve la URI gs:// del archivo normalizado.
+    Descarga audio de GCS, lo normaliza (Mono/Stereo, 16kHz/8kHz, FLAC/WAV) y lo sube a GCS.
+
+    Args:
+        gcs_src_uri: URI de origen en GCS (gs://bucket/path)
+        case_id: ID del caso (usado para organización)
+        bucket_name: Bucket de destino
+        target_sr: Sample rate objetivo (None = auto)
+        target_channels: Canales objetivo (1=mono, 2=stereo)
+        target_format: Formato de salida ('flac' o 'wav')
+        auto_sr: Si True, detecta automáticamente el mejor sample rate
+        force_normalize: Si False, solo normaliza si es estrictamente necesario
+
+    Returns:
+        URI del archivo normalizado en GCS
     """
-    import tempfile, os
-    from google.cloud import storage
-    from pydub import AudioSegment
-
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-
+    
+    # Validación básica de URI
     if not gcs_src_uri.startswith("gs://"):
-        raise ValueError("gcs_src_uri inválido")
+        raise ValueError(f"URI de origen inválida: {gcs_src_uri}")
 
-    src_bucket, src_blob = gcs_src_uri.replace("gs://", "").split("/", 1)
+    try:
+        parts = gcs_src_uri.replace("gs://", "").split("/", 1)
+        src_bucket_name = parts[0]
+        src_blob_name = parts[1]
+    except IndexError:
+        raise ValueError(f"URI mal formada: {gcs_src_uri}")
 
+    # Inicializar cliente
+    storage_client = storage.Client()
+    
     with tempfile.TemporaryDirectory() as td:
-        local_in = os.path.join(td, "in.bin")
-        storage_client.bucket(src_bucket).blob(src_blob).download_to_filename(local_in)
-        logger.info("📥 Descargado para normalizar: %s", gcs_src_uri)
+        # 1. Descarga
+        local_in = os.path.join(td, "source_audio")
+        
+        # Detectar extensión original
+        ext = os.path.splitext(src_blob_name)[1]
+        if ext:
+            local_in += ext
 
-        audio = AudioSegment.from_file(local_in)
+        logger.info(f"📥 Descargando audio desde: {gcs_src_uri}")
+        blob_source = storage_client.bucket(src_bucket_name).blob(src_blob_name)
+        blob_source.download_to_filename(local_in)
+
+        # 2. Procesamiento con Pydub
+        try:
+            audio = AudioSegment.from_file(local_in)
+        except Exception as e:
+            logger.error(f"❌ Error al leer el audio con Pydub: {e}")
+            raise
+
         orig_sr = int(audio.frame_rate or 0)
+        orig_channels = int(audio.channels)
 
-        # Elegir SR destino
+        # Lógica de Sample Rate (Auto)
         if target_sr is None:
             if auto_sr:
-                # Si la fuente es 12k o menos (típico telefónico 8k), usa 8k; si no, 16k
                 target_sr = 8000 if (orig_sr and orig_sr <= 12000) else 16000
             else:
                 target_sr = 16000
 
+        if target_channels is None:
+            target_channels = orig_channels
+
+        # Check if normalization is actually needed
+        needs_conversion = (
+            orig_sr != target_sr or
+            orig_channels != target_channels or
+            not local_in.endswith(f".{target_format}")
+        )
+
+        if not force_normalize and not needs_conversion:
+            logger.info(f"⚡ Skipping normalization - audio already in optimal format")
+            return gcs_src_uri  # Return original URI without processing
+
+        logger.info(f"🎛️ Normalizando: {orig_sr}Hz -> {target_sr}Hz | Canales: {audio.channels} -> {target_channels} | Fmt: {target_format}")
+
         audio = audio.set_frame_rate(target_sr).set_channels(target_channels)
 
-        # Exportar
-        stem = os.path.splitext(os.path.basename(src_blob))[0]
+        # 3. Exportación
+        stem = os.path.splitext(os.path.basename(src_blob_name))[0]
+        
         if target_format == "flac":
             local_out = os.path.join(td, f"{stem}_{target_sr}.flac")
             content_type = "audio/flac"
@@ -71,17 +109,18 @@ def normalize_and_upload_gcs(
             content_type = "audio/wav"
             audio.export(local_out, format="wav")
 
-        dest_name = f"processed/{os.path.basename(local_out)}"
-        blob = bucket.blob(dest_name)
+        # 4. Subida
+        dest_blob_name = f"processed/{os.path.basename(local_out)}"
+        bucket_dest = storage_client.bucket(bucket_name)
+        blob_dest = bucket_dest.blob(dest_blob_name)
 
-        # Sube con chunk grande (puedes ajustar por env)
         try:
             chunk_mb = int(os.getenv("GCS_UPLOAD_CHUNK_MB", "64"))
-            blob.chunk_size = chunk_mb * 1024 * 1024
+            blob_dest.chunk_size = chunk_mb * 1024 * 1024
         except Exception:
             pass
 
-        blob.upload_from_filename(local_out, content_type=content_type)
-        gcs_out = f"gs://{bucket_name}/{dest_name}"
-        logger.info("✅ Normalizado y subido: %s", gcs_out)
-        return gcs_out
+        logger.info(f"📤 Subiendo audio procesado a: gs://{bucket_name}/{dest_blob_name}")
+        blob_dest.upload_from_filename(local_out, content_type=content_type)
+        
+        return f"gs://{bucket_name}/{dest_blob_name}"

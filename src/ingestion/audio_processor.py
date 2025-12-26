@@ -198,8 +198,7 @@ def process_mp3_to_wav16k(
 
     Devuelve la ruta del WAV generado.
     """
-    from src.ingestion.audio_loader import load_mp3  # import local para evitar ciclos
-
+    from src.ingestion.audio_loader import load_mp3
     mp3_path = Path(mp3_path)
     out_dir = Path(out_dir)
 

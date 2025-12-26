@@ -1,15 +1,19 @@
 # TMF Audio/Video Transcription API (GCP / Cloud Run ready)
 
-Servicio FastAPI que:
+Servicio FastAPI que transcribe audios y videos de Google Drive con **enrutamiento inteligente** de motores de transcripción.
+
+## Características principales
 
 1. **Descarga** audio/video desde Google Drive
-2. **(Opcional) Normaliza** audio (volumen/formato/SR) y lo sube a GCS
-3. **Transcribe** con **Gemini (Vertex)** o **Speech-to-Text v2**
-4. **Escribe** la transcripción en un **Google Doc existente** (recibe `doc_id`) con **formato** (título, fecha, estilos)
-5. **Guarda** copia `.txt` en GCS
-6. Expone **/metrics** (Prometheus) y **/api/health**
+2. **Enrutamiento inteligente** que selecciona automáticamente el mejor motor de transcripción:
+   - **Gemini 2.5 Flash**: Rápido y económico para audios cortos/mono y videos
+   - **STT V1 Stereo**: Óptimo para llamadas telefónicas (8x8) y audios largos en estéreo
+3. **Normalización condicional**: Solo se normaliza cuando es necesario (STT requiere FLAC, Gemini consume MP3 directo)
+4. **Escribe** la transcripción en **Google Docs** con formato (título, fecha, estilos)
+5. **Actualiza Google Sheets** con resultados (estado, enlace, motor usado, duración)
+6. Expone **/metrics** (Prometheus), **/health** y **/docs**
 
-> **Cuenta de servicio** usada en tiempo de ejecución: `drive-sheets@ortega-473114.iam.gserviceaccount.com`
+> **Cuenta de servicio**: `drive-sheets@ortega-473114.iam.gserviceaccount.com`
 
 ---
 
@@ -18,34 +22,32 @@ Servicio FastAPI que:
 ```
 src/
   api/
-    main.py
-    routes/
-      audio_pipeline.py        # POST /api/transcribe (audio desde Drive)
-      video_pipeline.py        # POST /api/transcribe-video (video desde Drive → MP3)
-    middleware/
-      error_handler.py         # Formato de errores + logging
+    main.py                    # FastAPI app principal
+    routes.py                  # POST /api/transcribe (endpoint único)
+    schemas.py                 # TranscriptionRequest, TranscriptionResponse
+    error_handler.py           # Manejo global de errores
   docs/
-    google_docs_formatter.py   # Genera requests de formato (título, estilos, alineación)
-    google_docs_service.py     # Llama a Docs API (append / replace)
+    google_docs_service.py     # Escribe transcripciones en Google Docs
   ingestion/
-    drive_loader.py            # extract_drive_id(), download_from_drive(...)
-    video_audio.py             # extract_audio_to_mp3(...) con ffmpeg
-    google_auth_manager.py     # get_drive_docs() (SA u OAuth - aquí usamos SA)
-    auth_service.py            # Credenciales Service Account (Drive/Docs)
+    audio_processor.py         # Descarga desde Drive y extrae metadata
+    auth_service.py            # Credenciales Service Account (Drive/Docs/Sheets)
   orchestration/
-    runner.py                  # run_transcription_pipeline_to_doc(...)
-                               # run_transcription_pipeline_from_gcs(...)
+    runner.py                  # Pipeline principal: run_transcription_pipeline
+    router.py                  # Enrutamiento inteligente de motores
+  sheets/
+    sheets_service.py          # Actualiza Google Sheets con resultados
   storage/
-    upload_service.py          # Sube archivo local a GCS (upload_to_gcs)
-    gcs_uploader.py
-    gcs_cleaner.py
-    audio_normalizer_service.py# Normaliza y convierte a FLAC/WAV (cuando aplica)
+    audio_normalizer_service.py# Normalización condicional a FLAC/WAV
+    gcs_uploader.py            # Sube archivos a GCS
+    upload_service.py          # Servicio de carga
   transcription/
-    transcribers.py            # gemini_vertex_transcribe_gcs, stt_v2_transcribe_gcs, LRO, etc.
+    transcribers.py            # Motores: Gemini Flash, STT V1 Stereo/Mono
+    vertex_service.py          # Cliente Vertex AI
+  tools/
+    manage_recognizer.py       # CLI para gestionar recognizers de STT
   logging_conf.py
   metrics.py
-  recognizer.py
-  settings.py
+  settings.py                  # Configuración centralizada
 ```
 
 ## 🧠 Arquitectura
@@ -53,459 +55,504 @@ src/
 ### 1) Vista general (flujo funcional)
 
 ```mermaid
-%% 1) Vista general (flujo funcional) — ajustado a módulos reales
 sequenceDiagram
     autonumber
     participant U as Cliente (Thunder/Apps Script)
-    participant API as FastAPI (Cloud Run, /api/transcribe)
-    participant CFG as src/settings.py (Pydantic)
+    participant API as FastAPI (/api/transcribe)
+    participant RT as Router (orchestration/router.py)
     participant DR as Google Drive API
-    participant GCS as Cloud Storage (gs://my-bucket-out)
-    participant AU as storage/audio_normalizer_service.py
-    participant SP as Speech-to-Text v2
-    participant V as Vertex AI (Gemini/Claude)
+    participant GCS as Cloud Storage
+    participant AU as audio_normalizer_service
+    participant TR as Transcribers (STT/Gemini)
     participant GD as Google Docs API
-    participant GO as Google Doc destino
+    participant SH as Google Sheets API
 
-    Note over U,API: POST {case_id, media_link o video_link, doc_id, overrides}
-    U->>API: /api/transcribe (audio) / /api/transcribe-video (video)
+    U->>API: POST {case_id, drive_file_id, doc_id, strategy, sheet_callback}
 
-    Note over API,CFG: 1) Carga/validación de configuración
-    API->>CFG: Leer env (GCS_BUCKET, TRANSCRIBER, STT_*, PROMPT_FILE, ...)
-    CFG-->>API: OK (no-vacíos)
+    Note over API,DR: 1) Descarga desde Drive
+    API->>DR: download_from_drive(drive_file_id)
+    DR-->>API: archivo local + metadata (duración, canales, codec)
 
-    Note over API,DR: 2) Descarga desde Drive
-    API->>DR: download_from_drive(media_link) (ingestion/drive_loader.py)
-    DR-->>API: archivo local (mp3/mp4)
+    Note over API,RT: 2) Enrutamiento inteligente
+    API->>RT: route_request(metadata, strategy, is_8x8_call)
+    alt strategy="auto"
+        RT->>RT: Aplicar lógica de enrutamiento
+        Note over RT: 8x8 → STT V1<br/>Video → Gemini<br/>Largo+Stereo → STT V1<br/>Corto/Mono → Gemini
+    else strategy manual
+        RT->>RT: Usar motor especificado
+    end
+    RT-->>API: {backend, normalize_needed}
 
-    Note over API,GCS: 3) Subida base a GCS
-    API->>GCS: upload_to_gcs(...) (storage/upload_service.py)
-    GCS-->>API: gs://.../mp3/...
-
-    Note over API,AU: 4) (Opcional) Normalización/segmentación
-    API->>AU: a wav16k/flac (storage/audio_normalizer_service.py)
-    AU-->>API: gs://.../wav16k|flac/...
-
-    Note over API,V: 5) Transcripción
-    API->>API: Seleccionar backend (header/body/env)
-    alt Backend: gemini vertex
-        API->>V: generateContent(audio + prompt) (transcription/transcribers.py)
-        V-->>API: transcript (texto crudo)
-    else Backend: stt v2
-        API->>SP: Recognize (LRO) sobre wav16k|flac (transcription/transcribers.py)
-        SP-->>API: transcript (texto + opcional diarización)
+    Note over API,AU: 3) Normalización condicional
+    alt normalize_needed=true
+        API->>AU: normalize_to_flac_stereo()
+        AU-->>API: archivo normalizado
+    else normalize_needed=false
+        Note over API: Bypass de normalización (Gemini usa MP3 directo)
     end
 
-    Note over API,V: 6) Post-proceso/format (prompt)
-    API->>V: aplicar TRANSCRIPTION_PROMPT_FILE (si procede)
-    V-->>API: texto final
+    Note over API,GCS: 4) Subida a GCS
+    API->>GCS: upload_to_gcs(archivo)
+    GCS-->>API: gs_uri
 
-    Note over API,GD: 7) Escritura al Google Doc
-    API->>GD: batchUpdate(deleteAll + insertTop) (docs/google_docs_service.py)
-    GD-->>API: OK (estilos por docs/google_docs_formatter.py)
+    Note over API,TR: 5) Transcripción
+    alt Backend: Gemini
+        API->>TR: gemini_flash_transcribe(gs_uri)
+        TR-->>API: transcripción
+    else Backend: STT V1
+        API->>TR: stt_v1_stereo_transcribe(gs_uri)
+        TR-->>API: transcripción con diarización
+    end
 
-    Note over API,GCS: 8) Artefactos a GCS
-    API->>GCS: guardar .txt/.json en gs://.../audio_output/<case_id>/
-    GCS-->>API: OK
+    Note over API,GD: 6) Escritura a Google Docs
+    API->>GD: write_to_doc(doc_id, transcripción)
+    GD-->>API: OK
 
-    Note over API,U: 9) Respuesta y métricas
-    API-->>U: {status, doc_link, gcs_paths, backend, timing}
+    Note over API,SH: 7) Actualización de Sheet (opcional)
+    alt sheet_callback configurado
+        API->>SH: update_sheet(spreadsheet_id, row, status, doc_link, engine, duration)
+        SH-->>API: OK
+    end
 
+    API-->>U: {status, doc_id, backend_used, duration_seconds}
 ```
 
-### 2) Vista técnica (módulos y dependencias)
+### 2) Lógica de enrutamiento
 
-```mermaid
-%% 2) Vista técnica (módulos y dependencias) — mapeo 1:1 con Estructura clave
-graph LR
-  %% --- Capas internas ---
-  subgraph API["Capa API"]
-    M[[src/api/main.py]]
-    RA[[src/api/routes/audio_pipeline.py]]
-    RV[[src/api/routes/video_pipeline.py]]
-    EH[[src/api/middleware/error_handler.py]]
-  end
+El sistema selecciona automáticamente el mejor motor según las características del archivo:
 
-  subgraph ORQ["Orquestación"]
-    RUN[[src/orchestration/runner.py]]
-  end
+| Condición | Motor seleccionado | Razón |
+|-----------|-------------------|-------|
+| `is_8x8_call=true` | **STT V1 Stereo** | Llamadas telefónicas 8x8 requieren separación de canales |
+| Extensión `.mp4` | **Gemini Flash** | Videos se procesan directamente sin extracción de audio |
+| Duración > 25 min **Y** 2 canales | **STT V1 Stereo** | Audios largos en estéreo necesitan diarización robusta |
+| Cualquier otro caso | **Gemini Flash** | Más rápido y económico para audios cortos/mono |
 
-  subgraph ING["Ingesta (Drive/Video)"]
-    DL[[src/ingestion/drive_loader.py]]
-    VAU[[src/ingestion/video_audio.py]]
-    GAM[[src/ingestion/google_auth_manager.py]]
-  end
-
-  subgraph STR["Storage / Audio"]
-    UP[[src/storage/upload_service.py]]
-    GU[[src/storage/gcs_uploader.py]]
-    GC[[src/storage/gcs_cleaner.py]]
-    AN[[src/storage/audio_normalizer_service.py]]
-  end
-
-  subgraph TRN["Transcripción"]
-    TR[[src/transcription/transcribers.py]]
-  end
-
-  subgraph DOCS["Google Docs"]
-    GDF[[src/docs/google_docs_formatter.py]]
-    GDS[[src/docs/google_docs_service.py]]
-  end
-
-  subgraph CORE["Core / Infra"]
-    AS[[src/ingestion/auth_service.py]]
-    ST[[src/settings.py]]
-    LG[[src/logging_conf.py]]
-    MT[[src/metrics.py]]
-    RC[[src/recognizer.py]]
-  end
-
-  %% Relaciones internas
-  M --> RA
-  M --> RV
-  RA --> RUN
-  RV --> RUN
-  EH --> M
-
-  RUN --> DL
-  RUN --> VAU
-  RUN --> UP
-  RUN --> GU
-  RUN --> GC
-  RUN --> AN
-  RUN --> TR
-  RUN --> GDS
-  RUN --> GDF
-
-  DL --> GAM
-  GDS --> GDF
-
-  %% Core deps
-  RA --> ST
-  RV --> ST
-  RUN --> ST
-  DL --> ST
-  TR --> ST
-  UP --> ST
-  AN --> ST
-  GDS --> ST
-  GDF --> ST
-
-  RA --> LG
-  RV --> LG
-  RUN --> LG
-  TR --> LG
-  GDS --> LG
-  UP --> LG
-  AN --> LG
-  DL --> LG
-  MT --> LG
-
-  %% --- Servicios externos ---
-  subgraph EXT["Servicios Externos"]
-    CR[[Cloud Run]]
-    SA[[Service Account: drive-sheets@...]]
-    AR[[Artifact Registry]]
-    CL[[Cloud Logging]]
-    GCS[(Cloud Storage)]
-    DRV[(Google Drive API)]
-    GDA[(Google Docs API)]
-    STT[(Speech-to-Text v2)]
-    VTX[(Vertex AI Gemini/Claude)]
-  end
-
-  %% Conexiones externas
-  M -. despliegue .-> CR
-  CR -. usa .-> SA
-  AR -. imagen .-> CR
-  LG --> CL
-
-  UP --> GCS
-  GU --> GCS
-  GC --> GCS
-  AN --> GCS
-
-  DL --> DRV
-  GDS --> GDA
-
-  TR --> STT
-  TR --> VTX
-  AS -. credenciales/ADC .- CR
-  AS -. scopes .- DRV
-  AS -. scopes .- GDA
-  AS -. scopes .- GCS
-
-  %% Estilos
-  classDef api fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
-  classDef orq fill:#e8f5e9,stroke:#43a047,color:#1b5e20
-  classDef ing fill:#fff8e1,stroke:#f9a825,color:#f57f17
-  classDef str fill:#ede7f6,stroke:#5e35b1,color:#311b92
-  classDef trn fill:#f1f8e9,stroke:#7cb342,color:#33691e
-  classDef docs fill:#fff3e0,stroke:#fb8c00,color:#e65100
-  classDef core fill:#f3e5f5,stroke:#8e24aa,color:#4a148c
-  classDef ext fill:#eceff1,stroke:#607d8b,color:#37474f
-
-  class M,RA,RV,EH api
-  class RUN orq
-  class DL,VAU,GAM ing
-  class UP,GU,GC,AN str
-  class TR trn
-  class GDF,GDS docs
-  class AS,ST,LG,MT,RC core
-  class CR,SA,AR,CL,GCS,DRV,GDA,STT,VTX ext
-
-```
+**Normalización condicional:**
+- **STT V1**: Siempre normaliza a FLAC estéreo (16kHz)
+- **Gemini Flash**: Consume MP3 directamente (bypass de normalización = +60% velocidad)
 
 ---
 
 ## ⚙️ Prerrequisitos
 
 * **Python 3.11+**
-* **Google Cloud Project** con APIs:
-
-  * Google **Drive API**
-  * Google **Docs API**
-  * **Cloud Storage**
-  * **Vertex AI** (para Gemini-Vertex) y/o **Speech-to-Text v2**
+* **Google Cloud Project** con APIs habilitadas:
+  * Google Drive API
+  * Google Docs API
+  * Google Sheets API
+  * Cloud Storage
+  * Vertex AI API
+  * Speech-to-Text API
 * **Service Account** con permisos:
-
-  * Acceso **editor** al **Doc** *de destino* (lo comparte el Apps Script al crearlo)
-  * Acceso a los **archivos de Drive** de origen (compartidos o en Shared Drive)
-  * Permisos en **GCS bucket** (p.ej. `roles/storage.objectAdmin` sobre el bucket)
-* (Opcional para video) **ffmpeg** instalado localmente o definir `FFMPEG_BIN` (ruta absoluta)
+  * Acceso **editor** a los Google Docs de destino
+  * Acceso **editor** a las Google Sheets (para callbacks)
+  * Acceso a archivos de Drive (compartidos o en Shared Drive)
+  * `roles/storage.objectAdmin` en el bucket de GCS
+  * `roles/aiplatform.user` para Vertex AI
 
 ---
 
 ## 🔐 Variables de entorno (.env)
 
-Ejemplo mínimo:
+Configuración mínima:
 
 ```env
-# GCP / Credenciales
+# --- GCP / Credenciales ---
 GCP_PROJECT_ID=ortega-473114
 GCP_REGION=us-central1
 GOOGLE_APPLICATION_CREDENTIALS=./credencial/sa.json
 
-# Buckets
+# --- Cloud Storage ---
 USE_GCS=true
 GCS_BUCKET=my-bucket-out
 GCS_BUCKET_OUTPUT=my-bucket-out
 
-# Backend de transcripción (default si no hay override)
-TRANSCRIBER=gemini_vertex   # gemini_vertex | stt_v2
+# --- Motor de transcripción por defecto ---
+TRANSCRIBER_ENGINE=stt_v1_stereo  # stt_v1_stereo | gemini_flash
 
-# STT (defaults)
-STT_ENGINE=google
-STT_LANGUAGE_CODE=es-ES
-STT_ENABLE_DIARIZATION=false
-# Toggles de normalización para STT
-NORMALIZE_FOR_STT=true
-STT_TARGET_CODEC=flac       # flac | wav
-STT_TARGET_SR=8000          # 8000 recomendado para telefonía
+# --- Speech-to-Text ---
+STT_LANGUAGE_CODE=es-MX
+STT_ENABLE_DIARIZATION=true
+STT_MIN_SPEAKERS=2
+STT_MAX_SPEAKERS=2
+SPEECH_LOCATION=us-central1
+SPEECH_RECOGNIZER=projects/ortega-473114/locations/us-central1/recognizers/tmf-recognizer
 
-# Prompt (opcional)
-TRANSCRIPTION_PROMPT_FILE=./src/domain/prompts/transcription_prompt.md.j2
-GEMINI_API_KEY=             # (Sólo si usaras AI Studio; en Vertex no hace falta)
-
-# (Opcional) ffmpeg
-FFMPEG_BIN=C:/ffmpeg/bin/ffmpeg.exe
+# --- Rutas locales ---
+INPUT_DIR=./data/input
+WORK_DIR=./data/work
+OUTPUT_DIR=./data/output
 ```
 
-> **No** subas `sa.json` ni `.env` al repo.
+> **Importante**: No subas `sa.json` ni `.env` al repositorio.
 
 ---
 
 ## 🚀 Instalación y ejecución local
 
 ```bash
+# 1. Crear entorno virtual
 python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 2. Instalar dependencias
 pip install -r requirements.txt
 
-# Exporta/define .env (o usa dotenv)
-uvicorn src.api.main:app --reload --port 8080
+# 3. Configurar variables de entorno
+cp .env.example .env
+# Edita .env con tus credenciales
+
+# 4. Ejecutar API
+uvicorn src.main:app --reload --port 8080
 ```
 
-* **Health**: `GET http://127.0.0.1:8080/api/health`
-* **Métricas**: `GET http://127.0.0.1:8080/metrics` (Prometheus text format)
+**Endpoints disponibles:**
+- Health check: `GET http://127.0.0.1:8080/health`
+- Service account info: `GET http://127.0.0.1:8080/whoami`
+- API docs: `GET http://127.0.0.1:8080/docs`
+- Métricas: `GET http://127.0.0.1:8080/metrics`
 
 ---
 
 ## 📑 Contrato API
 
-### 1) Transcribir **audio** de Drive → anexar al Doc
+### Endpoint único: `POST /api/transcribe`
 
-`POST /api/transcribe`
+Acepta audios y videos de Google Drive, con enrutamiento inteligente automático.
 
-**Body**:
+**Request body**:
 
 ```json
 {
-  "case_id": "julio",
-  "title": "eficiencia operativa",
-  "media_link": "https://drive.google.com/file/d/1LJtgNV6CUwlRoxPfRAT-dJcNCRANMZMX/view?usp=drive_link",
-  "doc_id": "1JgSDjvvAmgq5ChY0qAdcUDFGx28lXuPrM25x0FXmr9U",
-  "language_code": "es-ES",
-  "diarization": false,
-  "model": "latest_long",
-  "transcriber": "stt_v2"
+  "case_id": "CASE-2024-001",
+  "title": "Llamada con cliente - Soporte técnico",
+  "drive_file_id": "1abc123xyz456789",
+  "doc_id": "1doc987xyz654321",
+  "strategy": "auto",
+  "language_code": "es-MX",
+  "is_8x8_call": false,
+  "sheet_callback": {
+    "spreadsheet_id": "1sheet789xyz",
+    "sheet_name": "Transcripciones",
+    "row_index": 5,
+    "transcript_doc_col": "E",
+    "status_col": "F",
+    "engine_col": "G",
+    "duration_col": "H"
+  }
 }
 ```
 
-**Headers opcionales**:
-
-* `X-Transcriber: gemini_vertex | stt_v2`  *(tiene prioridad sobre el body)*
+**Campos**:
+- `case_id`: Identificador único del caso
+- `title`: Título para el documento
+- `drive_file_id`: ID del archivo en Drive (extraído de la URL)
+- `doc_id`: ID del Google Doc de destino
+- `strategy`: Estrategia de routing (`"auto"`, `"gemini_flash"`, `"stt_v1_stereo"`)
+- `language_code`: Idioma del audio (opcional, default: `"es-MX"`)
+- `is_8x8_call`: Forzar STT V1 para llamadas 8x8 (opcional, default: `false`)
+- `sheet_callback`: Configuración para actualizar Google Sheets (opcional)
 
 **Response**:
 
 ```json
 {
-  "case_id": "julio",
-  "title": "eficiencia operativa",
-  "backend": "stt_v2",
-  "doc_id": "1JgSDjvvAmgq5ChY0qAdcUDFGx28lXuPrM25x0FXmr9U",
-  "duration_ms": 55325,
-  "timestamp": "2025-10-28T16:37:58.334123Z"
+  "case_id": "CASE-2024-001",
+  "doc_id": "1doc987xyz654321",
+  "backend_used": "Gemini 2.5 Flash",
+  "duration_seconds": 42.5,
+  "status": "success",
+  "timestamp": "2025-12-18T10:15:30.123Z",
+  "output_files": {
+    "google_doc": "https://docs.google.com/document/d/1doc987xyz654321/edit"
+  }
 }
 ```
-
-> También devuelve header `X-Backend: stt_v2 | gemini_vertex`.
-
-### 2) Transcribir **video** de Drive → (extrae MP3) → anexar al Doc
-
-`POST /api/transcribe-video`
-
-**Body**:
-
-```json
-{
-  "case_id": "julio",
-  "title": "eficiencia operativa",
-  "video_link": "https://drive.google.com/file/d/AAA.../view?usp=drive_link",
-  "doc_id": "1JgSDjvvAmgq5ChY0qAdcUDFGx28lXuPrM25x0FXmr9U",
-  "language_code": "es-ES",
-  "transcriber": "gemini_vertex"
-}
-```
-
-> Requiere **ffmpeg**. Si no está en `PATH`, define `FFMPEG_BIN`.
 
 ---
 
-## 🎚️ Selección de backend
+## 🎚️ Estrategias de transcripción
 
-Orden de precedencia:
+### 1. Modo automático (`strategy: "auto"`)
 
-1. **Header** `X-Transcriber`
-2. **Body** `transcriber`
-3. **.env** `TRANSCRIBER` (por defecto)
+El router selecciona el mejor motor basándose en:
+- Tipo de archivo (audio vs. video)
+- Duración del contenido
+- Número de canales (mono vs. stereo)
+- Flag `is_8x8_call`
 
-**Valores soportados**:
+**Ejemplo**: Audio corto mono → Gemini Flash (rápido + económico)
 
-* `gemini_vertex` → Consume **MP3 directo** desde GCS (rápido, sin normalizar).
-* `stt_v2` → Por defecto **normaliza** a FLAC/WAV.
-  Puedes desactivar la normalización con `NORMALIZE_FOR_STT=false` para consumir **MP3 directo** y ganar velocidad.
+### 2. Override manual
+
+Puedes forzar un motor específico:
+
+```json
+{
+  "strategy": "gemini_flash"    // Forzar Gemini
+}
+```
+
+```json
+{
+  "strategy": "stt_v1_stereo"   // Forzar STT V1
+}
+```
+
+### 3. Llamadas 8x8
+
+Para llamadas telefónicas de 8x8 (siempre en estéreo):
+
+```json
+{
+  "is_8x8_call": true  // Fuerza STT V1 Stereo automáticamente
+}
+```
 
 ---
 
 ## 📝 Formato en Google Docs
 
-El servicio **apendea** al final del Doc con:
+La transcripción se escribe en el Google Doc especificado con el siguiente formato:
 
-* **Título** + **sello de fecha**
-* Transcripción **línea a línea**, respetando:
+1. **Encabezado**: Título + fecha/hora de transcripción
+2. **Cuerpo**: Transcripción formateada según el motor:
+   - **STT V1**: Marcas de tiempo + diarización (Agente/Cliente)
+   - **Gemini**: Texto corrido con párrafos
 
-  * `[[00:05]]` → `[00:05]`
-  * Líneas tipo `[tt] Speaker: contenido` → cabecera en **negritas** y contenido debajo
-  * Líneas tipo `[tt] [Nota: ...]` → **itálica** y **gris**
-* Alineación **izquierda** en todo el rango insertado
-
-> El **Apps Script** creador del Doc debe **compartir** el documento con la SA o crearlo en un **Shared Drive** accesible por la SA.
+**Permisos necesarios**: El documento debe estar compartido con la cuenta de servicio en modo **Editor**, o ubicado en un Shared Drive accesible.
 
 ---
 
 ## 🧪 Ejemplos rápidos
 
-### Curl (audio)
+### 1. Transcripción automática (curl)
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/transcribe \
+curl -X POST "http://localhost:8080/api/transcribe" \
   -H "Content-Type: application/json" \
-  -H "X-Transcriber: stt_v2" \
   -d '{
-    "case_id":"julio",
-    "title":"eficiencia operativa",
-    "media_link":"https://drive.google.com/file/d/1LJt.../view?usp=drive_link",
-    "doc_id":"1JgSDjvvAmgq5ChY0qAdcUDFGx28lXuPrM25x0FXmr9U",
-    "language_code":"es-ES"
+    "case_id": "CASE-001",
+    "title": "Llamada con cliente",
+    "drive_file_id": "1abc123xyz",
+    "doc_id": "1doc456xyz",
+    "strategy": "auto",
+    "language_code": "es-MX"
   }'
 ```
 
-### Apps Script (fetch)
+### 2. Llamada 8x8 (curl)
 
-```js
-UrlFetchApp.fetch("http://127.0.0.1:8080/api/transcribe", {
-  method: "post",
-  contentType: "application/json",
-  headers: { "X-Transcriber": "gemini_vertex" },
-  payload: JSON.stringify({
-    case_id: "julio",
-    title: "eficiencia operativa",
-    media_link: "https://drive.google.com/file/d/1LJt.../view?usp=drive_link",
-    doc_id: "1JgSDjvvAmgq5ChY0qAdcUDFGx28lXuPrM25x0FXmr9U",
-    language_code: "es-ES"
-  }),
-});
+```bash
+curl -X POST "http://localhost:8080/api/transcribe" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "case_id": "8x8-CALL-042",
+    "title": "Soporte técnico - Ticket #12345",
+    "drive_file_id": "1stereo_call_123",
+    "doc_id": "1doc_call_456",
+    "is_8x8_call": true,
+    "language_code": "es-MX"
+  }'
+```
+
+### 3. Con callback a Google Sheets (Python)
+
+```python
+import requests
+
+response = requests.post(
+    "http://localhost:8080/api/transcribe",
+    json={
+        "case_id": "CASE-099",
+        "title": "Entrevista legal",
+        "drive_file_id": "1audio_555",
+        "doc_id": "1doc_777",
+        "strategy": "auto",
+        "sheet_callback": {
+            "spreadsheet_id": "1sheet_999",
+            "sheet_name": "Transcripciones",
+            "row_index": 12,
+            "transcript_doc_col": "E",
+            "status_col": "F",
+            "engine_col": "G",
+            "duration_col": "H"
+        }
+    }
+)
+
+print(response.json())
+```
+
+### 4. Desde Google Apps Script
+
+```javascript
+function transcribeAudio(driveFileId, docId) {
+  const API_URL = 'https://your-api.run.app/api/transcribe';
+
+  const payload = {
+    'case_id': 'GAS-' + new Date().getTime(),
+    'title': 'Transcripción desde Apps Script',
+    'drive_file_id': driveFileId,
+    'doc_id': docId,
+    'strategy': 'auto',
+    'language_code': 'es-MX'
+  };
+
+  const options = {
+    'method': 'post',
+    'contentType': 'application/json',
+    'payload': JSON.stringify(payload),
+    'muteHttpExceptions': true
+  };
+
+  const response = UrlFetchApp.fetch(API_URL, options);
+  const result = JSON.parse(response.getContentText());
+
+  Logger.log('Resultado: ' + JSON.stringify(result));
+  return result;
+}
+```
+
+Para más ejemplos detallados, consulta [API_EXAMPLES.md](./API_EXAMPLES.md).
+
+---
+
+## 📊 Métricas y monitoreo
+
+### Endpoints de salud
+
+- `GET /health` → Estado del servicio
+- `GET /whoami` → Información de la cuenta de servicio
+- `GET /metrics` → Métricas Prometheus
+
+### Métricas disponibles
+
+- Latencias de transcripción por motor
+- Conteos de éxito/error
+- Tiempos de normalización
+- Uso de enrutamiento (auto vs. manual)
+
+---
+
+## 🧯 Troubleshooting
+
+### Error: "No se pudo descargar el archivo de Drive"
+
+**Causa**: Archivo no compartido con la cuenta de servicio o ID incorrecto.
+
+**Solución**:
+1. Verifica que el `drive_file_id` es correcto
+2. Comparte el archivo con `drive-sheets@ortega-473114.iam.gserviceaccount.com` en modo Lector
+3. O coloca el archivo en un Shared Drive accesible
+
+### Error: "No se pudo escribir en el documento"
+
+**Causa**: Google Doc no compartido con la cuenta de servicio.
+
+**Solución**:
+1. Comparte el documento con `drive-sheets@ortega-473114.iam.gserviceaccount.com` en modo **Editor**
+2. O crea el documento en un Shared Drive accesible
+
+### Error: "Failed to update Google Sheet"
+
+**Causa**: Hoja no compartida o configuración incorrecta del callback.
+
+**Solución**:
+1. Comparte la hoja con la cuenta de servicio en modo Editor
+2. Verifica que `sheet_name` coincide exactamente con el nombre de la pestaña
+3. Verifica que las columnas especificadas (`E`, `F`, `G`, `H`) son válidas
+
+### Rendimiento: Transcripciones lentas
+
+**Posibles causas**:
+1. Normalización innecesaria activada para Gemini
+2. Archivos muy grandes sin compresión
+
+**Solución**:
+- Usa `strategy: "gemini_flash"` para audios cortos (evita normalización)
+- Comprime videos antes de subirlos a Drive
+
+---
+
+## 🏭 Despliegue en Cloud Run
+
+### Pasos básicos
+
+1. **Construir imagen Docker**:
+   ```bash
+   gcloud builds submit --tag gcr.io/ortega-473114/transcription-api
+   ```
+
+2. **Desplegar en Cloud Run**:
+   ```bash
+   gcloud run deploy transcription-api \
+     --image gcr.io/ortega-473114/transcription-api \
+     --region us-central1 \
+     --platform managed \
+     --allow-unauthenticated \
+     --memory 2Gi \
+     --timeout 900
+   ```
+
+3. **Configurar variables de entorno** en la consola de Cloud Run:
+   - `GCP_PROJECT_ID`
+   - `GCP_REGION`
+   - `GCS_BUCKET`
+   - `SPEECH_RECOGNIZER`
+   - `TRANSCRIBER_ENGINE`
+
+4. **Montar credenciales** como Secret Manager:
+   ```bash
+   gcloud secrets create service-account-key --data-file=./credencial/sa.json
+   ```
+
+Para más detalles, consulta [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md).
+
+---
+
+## 🛠️ Herramientas CLI
+
+### Gestión de recognizers STT
+
+```bash
+# Listar recognizers
+python -m src.tools.manage_recognizer list
+
+# Crear recognizer
+python -m src.tools.manage_recognizer create \
+  --name tmf-recognizer \
+  --location us-central1
+
+# Eliminar recognizer
+python -m src.tools.manage_recognizer delete \
+  --name tmf-recognizer \
+  --location us-central1
 ```
 
 ---
 
-## 📊 Métricas y salud
+## 📄 Documentación adicional
 
-* `GET /api/health` → `{ "status": "ok" }`
-* `GET /metrics` → métricas Prometheus (latencias, conteos, errores por backend, etc.)
-
----
-
-## 🧯 Errores comunes (y cómo resolver)
-
-* **400** `Invalid insertText index` en Docs
-
-  * Aseguramos *offset* al final del body (`endIndex - 2`). Ya contemplado en `google_docs_service.py`.
-* **403/404** al descargar de Drive
-
-  * Verifica que el **archivo** está **compartido** con la SA o vive en un **Shared Drive** accesible.
-* **403** al escribir en Docs
-
-  * Asegura que el **Doc** está compartido con la SA (editor) o en un Shared Drive.
-* **ALTS creds ignored** (warning)
-
-  * Informativo en local; ignóralo.
-* **ffmpeg** no encontrado
-
-  * Instala ffmpeg o define `FFMPEG_BIN` con la ruta del binario.
+- [API_EXAMPLES.md](./API_EXAMPLES.md) - Ejemplos completos de uso de la API
+- [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md) - Guía detallada de despliegue
 
 ---
 
-## 🏭 Despliegue (Cloud Run – pista rápida)
+## 📝 Licencia
 
-1. Agrega `ffmpeg` al contenedor si vas a usar `/api/transcribe-video`.
-2. Monta `GOOGLE_APPLICATION_CREDENTIALS` como **secret** o var de entorno.
-3. Concede a la **SA de ejecución** permisos en GCS y Vertex/STT según el backend.
-
-*(Si quieres, te dejo un `Dockerfile` con ffmpeg estático en otro momento.)*
+Proyecto interno de TMF.
 
 ---
 
-## 📄 Licencia
+## 📊 Changelog
 
-Consulta el archivo **LICENCE** en la raíz.
-
----
-
-## 💬 Soporte y mantenimiento
-
-* **Logs** enriquecidos y tiempos por fase (`metrics.py`)
-* **Override** de backend por header/body
-* **Toggles** de normalización en STT
-* **Formato** en Docs robusto (con opción a *fallback* a texto plano si lo habilitas después)
+### v2.0 (Diciembre 2025)
+- ✨ Enrutamiento inteligente automático de motores
+- ✨ Integración con Google Sheets (callbacks)
+- ✨ Normalización condicional (bypass para Gemini)
+- ✨ Endpoint único `/api/transcribe`
+- ✨ Soporte nativo para videos (.mp4)
+- 🐛 Corrección de manejo de errores
+- 📝 Refactorización completa del código

@@ -1,45 +1,74 @@
-# ===============================
-# CORE GOOGLE CLOUD / AI
-# ===============================
-google-cloud-storage==2.18.2
-google-cloud-aiplatform==1.70.0
-google-generativeai==0.7.2
+annotated-types==0.7.0
+anyio==4.12.0
+cachetools==5.5.2
+certifi==2025.11.12
+chardet==5.2.0
+charset-normalizer==3.4.4
+click==8.3.1
+docstring_parser==0.17.0
+fastapi==0.115.2
+ffmpeg-python==0.2.0
+future==1.0.0
+google-ai-generativelanguage==0.6.6
+google-api-core==2.28.1
 google-api-python-client==2.154.0
 google-auth==2.35.0
-google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+google-cloud-aiplatform==1.70.0
+google-cloud-bigquery==3.38.0
+google-cloud-core==2.5.0
+google-cloud-resource-manager==1.15.0
 google-cloud-speech==2.33.0
-
-# ===============================
-# API / SERVER
-# ===============================
-fastapi==0.115.2
-uvicorn==0.31.1
-pydantic==2.9.2
-tenacity==9.0.0
-
-# ===============================
-# AUDIO PROCESSING
-# ===============================
-pydub==0.25.1
-ffmpeg-python==0.2.0
-
-# ===============================
-# DOCUMENT / REPORTING
-# ===============================
-reportlab==4.2.5
-PyPDF2==3.0.1
-python-docx==1.1.2
-PyMuPDF==1.24.10
-Jinja2==3.1.4
-
-# ===============================
-# DATA / AUTOMATION
-# ===============================
+google-cloud-storage==2.18.2
+google-crc32c==1.7.1
+google-generativeai==0.7.2
+google-resumable-media==2.8.0
+googleapis-common-protos==1.72.0
+grpc-google-iam-v1==0.14.3
+grpcio==1.76.0
+grpcio-status==1.62.3
 gspread==6.1.4
-python-dotenv==1.0.1
+h11==0.16.0
+httplib2==0.31.0
+idna==3.11
+Jinja2==3.1.4
+lxml==6.0.2
+MarkupSafe==3.0.3
+numpy==2.3.5
+oauthlib==3.3.1
+packaging==25.0
+pillow==10.4.0
 polars==1.12.0
-
-prometheus-client
-prometheus-fastapi-instrumentator
-httplib2>=0.22.0
+prometheus-fastapi-instrumentator==7.1.0
+prometheus_client==0.23.1
+proto-plus==1.26.1
+protobuf==4.25.8
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
+pydantic==2.9.2
+pydantic-settings==2.12.0
+pydantic_core==2.23.4
+pydub==0.25.1
+PyMuPDF==1.24.10
+PyMuPDFb==1.24.10
+pyparsing==3.2.5
+PyPDF2==3.0.1
+python-dateutil==2.9.0.post0
+python-docx==1.1.2
+python-dotenv==1.0.1
+reportlab==4.2.5
+requests==2.32.5
+requests-oauthlib==2.0.0
+rsa==4.9.1
+shapely==2.1.2
+six==1.17.0
+starlette==0.40.0
+tenacity==9.0.0
+tqdm==4.67.1
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+uritemplate==4.2.0
+urllib3==2.5.0
+uvicorn==0.31.1
+google-genai==0.3.0

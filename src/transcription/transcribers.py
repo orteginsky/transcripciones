@@ -1,386 +1,209 @@
+#src/transcription/transcribers.py
 from __future__ import annotations
-from typing import Optional, List
 import os
-import tempfile
+import time
+from typing import Optional, List, Dict, Any
 
-from google.api_core import exceptions as gexc
-from google.cloud import speech_v2
-from google.cloud.speech_v2.types import CreateRecognizerRequest, Recognizer
+from google.cloud import speech_v1 as speech
+from google.api_core.exceptions import GoogleAPICallError
 
 from src.logging_conf import get_logger
-from src.settings import get_settings
+from src.settings import settings
 
 logger = get_logger(__name__)
 
 # ================================================================
-# SPEECH V2 HELPERS
+# 1. UTILIDADES Y FORMATO
 # ================================================================
 
-def _speech_client(location: str = "global") -> speech_v2.SpeechClient:
-    """Devuelve un SpeechClient apuntando explícitamente al endpoint de la location."""
-    api_endpoint = (
-        "speech.googleapis.com" if location == "global" else f"{location}-speech.googleapis.com"
-    )
-    return speech_v2.SpeechClient(client_options={"api_endpoint": api_endpoint})
+def _seconds_to_time_str(total_seconds: float) -> str:
+    """Convierte segundos (float) a formato MM:SS."""
+    seconds = int(total_seconds)
+    m = seconds // 60
+    s = seconds % 60
+    return f"{m:02}:{s:02}"
 
-
-def _recognizer_path(project_id: Optional[str], location: str, recognizer_id: str) -> str:
-    return f"projects/{project_id}/locations/{location}/recognizers/{recognizer_id}"
-
-
-def _ensure_recognizer(
-    *,
-    project_id: Optional[str],
-    location: str = "global",
-    recognizer_id: str = "default-stt",
-    language_code: str = "es-MX",
-    model: str = "long",
-    enable_diarization: bool = False,
-) -> Optional[str]:
-    """Obtiene o crea un Recognizer v2 y devuelve su 'name'."""
-    client = _speech_client(location)
-    parent = f"projects/{project_id}/locations/{location}"
-    name = _recognizer_path(project_id, location, recognizer_id)
-
-    try:
-        client.get_recognizer(name=name)
-        logger.info("Recognizer existente: %s", name)
-        return name
-    except gexc.NotFound:
-        pass
-
-    rec = Recognizer(
-        display_name="Default STT (auto)",
-        default_recognition_config=speech_v2.RecognitionConfig(
-            auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
-            language_codes=[language_code],
-            model=model,
-            features=speech_v2.RecognitionFeatures(
-                enable_automatic_punctuation=True,
-                diarization_config=(
-                    speech_v2.SpeakerDiarizationConfig(
-                        min_speaker_count=2, max_speaker_count=2
-                    ) if enable_diarization else None
-                ),
-            ),
-        ),
-    )
-
-    req = CreateRecognizerRequest(parent=parent, recognizer_id=recognizer_id, recognizer=rec)
-    logger.info("Creando Recognizer en %s con id '%s'…", parent, recognizer_id)
-    op = client.create_recognizer(request=req)
-    created: Optional[Recognizer] = op.result(timeout=600)
-    if created:
-        logger.info("Recognizer creado: %s", created.name)
-        return created.name
-    logger.error("No se pudo crear Recognizer.")
-    return None
-
-
+def _setup_credentials():
+    """Asegura que las credenciales estén en el entorno."""
+    if settings.google_application_credentials:
+        if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
+             if os.path.exists(settings.google_application_credentials):
+                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.google_application_credentials
 
 # ================================================================
-# GEMINI VIA AI STUDIO (API KEY)
+# 2. PARSER DE ESTÉREO (INTERCALADO CRONOLÓGICO)
 # ================================================================
 
-def gemini_transcribe_gcs(
-    gcs_wav_uri: str,
-    *,
-    model_name: str = "gemini-2.0-flash",
-    prompt: Optional[str] = None,
-    mime_type: str = "audio/wav",
-    language_code: Optional[str] = None,
-) -> str:
-    """Transcribe un archivo desde GCS usando Google Generative AI (API key)."""
-    import google.generativeai as genai
-    from google.cloud import storage
+def _parse_stereo_response(response: speech.LongRunningRecognizeResponse) -> str:
+    """
+    Procesa la respuesta de V1 en modo 'separate_recognition_per_channel'.
+    Toma las palabras de ambos canales, las ordena por tiempo y genera el formato de bloque.
+    """
+    # 1. Recopilar todas las palabras con su canal y tiempo
+    all_words: List[Dict[str, Any]] = []
 
-    s = get_settings()
-    if not s.gemini_api_key:
-        raise ValueError("Falta GEMINI_API_KEY en settings/env para usar Gemini.")
+    # Iteramos sobre los resultados. En modo estéreo, Google devuelve resultados
+    # etiquetados con channel_tag (1=Izquierdo/Agente, 2=Derecho/Cliente).
+    for result in response.results:
+        # channel_tag viene a nivel de resultado
+        channel = result.channel_tag
+        
+        # Fallback: Si channel es 0, asumimos 1
+        if channel == 0: 
+            channel = 1
+            
+        # Tomamos la mejor alternativa
+        if not result.alternatives:
+            continue
+            
+        alternative = result.alternatives[0]
+        
+        # Necesitamos palabras con tiempos para ordenar
+        for word_info in alternative.words:
+            all_words.append({
+                "word": word_info.word,
+                "start_time": word_info.start_time.total_seconds(),
+                "channel": channel
+            })
 
-    genai.configure(api_key=s.gemini_api_key)
-    model = genai.GenerativeModel(model_name=model_name, generation_config={"temperature": 0.0})
+    if not all_words:
+        return "⚠️ Audio procesado pero no se detectaron palabras (posible silencio o error de formato)."
 
-    # Prompt con pista de idioma
-    lang = language_code or getattr(s, "stt_language_code", None) or "es-ES"
-    base_prompt = (
-        prompt
-        or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None)
-        or "Transcribe fielmente el audio (sin parafrasear)."
-    )
-    system_prompt = f"{base_prompt}\n\nIdioma objetivo: {lang}. No traduzcas; conserva el idioma original del audio."
+    # 2. Ordenar cronológicamente para mezclar la conversación
+    # Esto es vital: mezcla las dos pistas en una sola línea de tiempo
+    all_words.sort(key=lambda x: x["start_time"])
 
-    if not gcs_wav_uri.startswith("gs://"):
-        raise ValueError(f"URI inválida: {gcs_wav_uri}")
+    # 3. Construir bloques de texto por turno de hablante
+    output_blocks = []
+    
+    current_channel = None
+    current_buffer = []
+    block_start_time = 0.0
 
-    bucket_name, blob_name = gcs_wav_uri.replace("gs://", "").split("/", 1)
-    tmp_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-    storage.Client().bucket(bucket_name).blob(blob_name).download_to_filename(tmp_path)
-    logger.info("📥 Archivo descargado temporalmente desde GCS: %s", tmp_path)
+    for item in all_words:
+        ch = item["channel"]
+        word = item["word"]
+        time = item["start_time"]
 
-    uploaded = genai.upload_file(tmp_path, mime_type=mime_type)
-    logger.info("📤 Archivo subido a AI Studio: %s", uploaded.name)
+        # Si cambiamos de canal (hablante), cerramos el bloque anterior
+        if current_channel is not None and ch != current_channel:
+            timestamp = _seconds_to_time_str(block_start_time)
+            text_block = " ".join(current_buffer)
+            
+            # Mapeo de canales a etiquetas legibles
+            # Canal 1 suele ser Izquierdo (Agente 8x8), Canal 2 Derecho (Cliente)
+            speaker_label = "Agente" if current_channel == 1 else "Cliente"
+            
+            # Formato requerido por tu sistema
+            block_str = f"[{timestamp}] {speaker_label}:|SEPARATOR|{text_block}"
+            output_blocks.append(block_str)
+            
+            # Reiniciar buffer
+            current_buffer = []
+            block_start_time = time # El nuevo bloque empieza con esta palabra
+        
+        if current_buffer == []:
+            block_start_time = time
+            
+        current_channel = ch
+        current_buffer.append(word)
 
-    resp = model.generate_content(
-        [
-            {"role": "user", "parts": [{"text": system_prompt}]},
-            {"role": "user", "parts": [uploaded]},
-        ]
-    )
-    text = (getattr(resp, "text", "") or "").strip()
+    # 4. Agregar el último bloque pendiente
+    if current_channel and current_buffer:
+        timestamp = _seconds_to_time_str(block_start_time)
+        text_block = " ".join(current_buffer)
+        speaker_label = "Agente" if current_channel == 1 else "Cliente"
+        
+        block_str = f"[{timestamp}] {speaker_label}:|SEPARATOR|{text_block}"
+        output_blocks.append(block_str)
 
-    try:
-        os.remove(tmp_path)
-        logger.info("🧹 Archivo temporal eliminado: %s", tmp_path)
-    except Exception as e:
-        logger.warning("No se pudo eliminar el archivo temporal: %s", e)
-
-    return text
-
-# ================================================================
-# GEMINI VIA VERTEX AI (SERVICE ACCOUNT)
-# ================================================================
-
-def gemini_vertex_transcribe_gcs(
-    gcs_wav_uri: str,
-    *,
-    model_name: str = "gemini-2.0-flash",
-    mime_type: str = "audio/wav",
-    system_prompt: str | None = None,
-    language_code: Optional[str] = None,
-) -> str:
-    """Transcribe un archivo de audio directamente desde GCS usando Vertex AI Gemini."""
-    import vertexai
-    from vertexai.generative_models import GenerativeModel, Part
-
-    s = get_settings()
-    project_id = getattr(s, "gcp_project_id", None) or s.project_id
-    region = getattr(s, "gcp_region", None) or getattr(s, "vertex_location", None)
-
-    if not project_id or not region:
-        raise ValueError("Faltan variables GCP_PROJECT_ID o GCP_REGION en .env")
-
-    vertexai.init(project=project_id, location=region)
-
-    lang = language_code or getattr(s, "stt_language_code", None) or "es-ES"
-    base_prompt = system_prompt or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None)
-    if not base_prompt:
-        base_prompt = (
-            "Transcribe fielmente el audio (sin parafrasear). "
-            "Usa puntuación básica y marca lo inaudible como [Nota: inaudible]."
-        )
-    prompt_text = f"{base_prompt}\n\nIdioma objetivo: {lang}. No traduzcas; conserva el idioma original del audio."
-
-    logger.info("🧠 Prompt (%d chars): %.200s...", len(prompt_text), prompt_text)
-
-    model = GenerativeModel(model_name)
-    audio_part = Part.from_uri(gcs_wav_uri, mime_type=mime_type)
-
-    resp = model.generate_content([prompt_text, audio_part])
-    text = (getattr(resp, "text", "") or "").strip()
-    logger.info("✅ Transcripción obtenida (%d caracteres)", len(text))
-    return text
-
+    return "\n\n".join(output_blocks)
 
 # ================================================================
-# SPEECH-TO-TEXT V2
-# ================================================================
-
-def stt_v2_transcribe_gcs(
-    gcs_wav_uri: str,
-    *,
-    language: str | None = None,
-    language_code: str | None = None,
-    diarization: bool | None = None,
-    model: str = "long",
-    automatic_punctuation: bool = True,
-    min_speakers: int | None = None,
-    max_speakers: int | None = None,
-) -> str:
-    """Reconocimiento síncrono con alias language_code."""
-    s = get_settings()
-    lang = language_code or language or s.stt_language_code or "es-MX"
-    diarization = bool(s.stt_enable_diarization if diarization is None else diarization)
-    min_speakers = min_speakers or int(os.getenv("STT_MIN_SPEAKERS", "2"))
-    max_speakers = max_speakers or int(os.getenv("STT_MAX_SPEAKERS", "2"))
-    location = (getattr(s, "speech_location", None) or os.getenv("SPEECH_LOCATION", "global")).lower()
-
-    client = _speech_client(location)
-    recognizer = (
-        getattr(s, "speech_recognizer", None)
-        or os.getenv("SPEECH_RECOGNIZER", "").strip()
-    )
-    if not recognizer:
-        recognizer = _ensure_recognizer(
-            project_id=s.project_id,
-            location=location,
-            recognizer_id="default-stt",
-            language_code=lang,
-            model=model,
-            enable_diarization=False,
-        )
-
-    logger.info(
-        "STT v2 | endpoint=%s | recognizer=%s | lang=%s | diarization=%s",
-        location, recognizer, lang, diarization,
-    )
-
-    feats = speech_v2.RecognitionFeatures(
-        enable_automatic_punctuation=automatic_punctuation,
-        diarization_config=(
-            speech_v2.SpeakerDiarizationConfig(
-                min_speaker_count=min_speakers,
-                max_speaker_count=max_speakers,
-            ) if diarization else None
-        ),
-    )
-
-    config = speech_v2.RecognitionConfig(
-        auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
-        language_codes=[lang],
-        model=model,
-        features=feats,
-    )
-
-    try:
-        resp = client.recognize(
-            request=speech_v2.RecognizeRequest(
-                recognizer=recognizer,
-                config=config,
-                uri=gcs_wav_uri,
-            )
-        )
-    except gexc.NotFound:
-        logger.warning("Recognizer no encontrado. Reintentando con nuevo recognizer…")
-        recognizer = _ensure_recognizer(
-            project_id=s.project_id,
-            location=location,
-            recognizer_id="default-stt",
-            language_code=lang,
-            model=model,
-        )
-        resp = client.recognize(
-            request=speech_v2.RecognizeRequest(
-                recognizer=recognizer,
-                config=config,
-                uri=gcs_wav_uri,
-            )
-        )
-
-    parts: List[str] = []
-    for result in resp.results:
-        if result.alternatives:
-            parts.append(result.alternatives[0].transcript.strip())
-
-    return "\n".join(p for p in parts if p).strip()
-
-
-# ================================================================
-# FACADE PRINCIPAL
+# 3. MOTOR DE TRANSCRIPCIÓN (V1 TRUE STEREO)
 # ================================================================
 
 def transcribe_from_gcs_uri(
     gcs_wav_uri: str,
     *,
     language_code: Optional[str] = None,
-    prompt: Optional[str] = None,
 ) -> str:
-    """Selecciona el backend configurado y ejecuta la transcripción (con language_code)."""
-    s = get_settings()
-    backend = (s.transcriber or "stt_v2").lower()
-    lang = language_code or getattr(s, "stt_language_code", None) or "es-MX"
+    """
+    Transcribe usando Google Speech-to-Text V1 optimizado para llamadas ESTÉREO (8x8).
+    
+    Estrategia: 'True Stereo'
+    - No usa diarización por IA.
+    - Separa físicamente el canal izquierdo (Agente) del derecho (Cliente).
+    - Ordena las palabras por timestamp para reconstruir el diálogo.
+    """
+    _setup_credentials()
 
-    if backend == "gemini_vertex":
-        return gemini_vertex_transcribe_gcs(
-            gcs_wav_uri,
-            system_prompt=prompt or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None),
-            language_code=lang,
-        )
+    client = speech.SpeechClient()
+    
+    logger.info(f"🎙️ [STT V1 Stereo] Iniciando transcripción: {gcs_wav_uri}")
 
-    if backend == "gemini":
-        return gemini_transcribe_gcs(
-            gcs_wav_uri,
-            prompt=prompt or getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None),
-            language_code=lang,
-        )
+    audio = speech.RecognitionAudio(uri=gcs_wav_uri)
 
-    return stt_v2_transcribe_gcs(
-        gcs_wav_uri,
-        language_code=lang,
-        diarization=s.stt_enable_diarization,
+    # CONFIGURACIÓN OPTIMIZADA PARA 8x8 STEREO
+    # Nota: Asumimos que el audio ya fue validado como Estéreo en el paso anterior.
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.FLAC,
+        sample_rate_hertz=8000,
+        language_code=language_code or settings.stt_language_code,
+        
+        # --- CONFIGURACIÓN DE CANALES (EL SECRETO) ---
+        audio_channel_count=2, 
+        enable_separate_recognition_per_channel=True,
+        
+        # --- IMPORTANTE: TIMESTAMPS ---
+        # Necesarios para ordenar las frases del canal 1 y 2 cronológicamente
+        enable_word_time_offsets=True,
+        
+        enable_automatic_punctuation=True,
+        model="phone_call", # El mejor modelo para telefonía
+        use_enhanced=True,
     )
 
-def stt_v2_transcribe_gcs_lro(
-    gcs_wav_uri: str,
-    *,
-    language: str | None = None,
-    language_code: str | None = None,
-    diarization: bool | None = None,
-    model: str = "long",
-    automatic_punctuation: bool = True,
-    timeout_sec: int = 3600,
-    min_speakers: int | None = None,
-    max_speakers: int | None = None,
-) -> str:
-    """BatchRecognize para audios largos (LRO) con alias language_code."""
-    from google.cloud import speech_v2
-    from google.api_core import exceptions as gexc
+# ... dentro de transcribe_from_gcs_uri ...
 
-    s = get_settings()
-    lang = language_code or language or s.stt_language_code or "es-MX"
-    diarization = bool(s.stt_enable_diarization if diarization is None else diarization)
-    min_speakers = min_speakers or int(os.getenv("STT_MIN_SPEAKERS", "2"))
-    max_speakers = max_speakers or int(os.getenv("STT_MAX_SPEAKERS", "2"))
-    location = (getattr(s, "speech_location", None) or "global").lower()
+    try:
+        logger.info("⏳ Enviando operación LongRunning (V1)...")
+        operation = client.long_running_recognize(config=config, audio=audio)
+        
+        # --- CAMBIO: BUCLE DE POLLING MANUAL (Anti-Timeout) ---
+        # En lugar de bloquearnos por 3 horas en silencio, preguntamos cada 10s.
+        # Esto evita que balanceadores de carga o firewalls corten la conexión por inactividad.
+        
+        start_time = time.time()
+        max_seconds = 11000  # 3 horas aprox
+        
+        logger.info(f"🔄 Polling iniciado. ID Operación: {operation.operation.name}")
+        
+        while not operation.done():
+            # Verificar si excedimos el tiempo total
+            elapsed = time.time() - start_time
+            if elapsed > max_seconds:
+                raise TimeoutError(f"La transcripción excedió el límite de {max_seconds}s.")
+            
+            # Log de latidos cada ~60 segundos para que veas que sigue vivo
+            if int(elapsed) % 60 == 0:
+                logger.info(f"   ... procesando STT ({int(elapsed)}s transcurridos) ...")
+            
+            # Esperar 10 segundos antes de volver a preguntar
+            time.sleep(10)
 
-    client = _speech_client(location)
-    recognizer = _ensure_recognizer(
-        project_id=s.project_id,
-        location=location,
-        recognizer_id="default-stt",
-        language_code=lang,
-        model=model,
-    )
+        # Una vez que done() es True, result() devuelve la respuesta inmediatamente
+        response = operation.result()
+        # -------------------------------------------------------
+        
+        logger.info("✅ Transcripción V1 finalizada exitosamente.")
+        
+        # Parsear resultado
+        full_text = _parse_stereo_response(response)
+        return full_text
 
-    feats = speech_v2.RecognitionFeatures(
-        enable_automatic_punctuation=automatic_punctuation,
-        diarization_config=(
-            speech_v2.SpeakerDiarizationConfig(
-                min_speaker_count=min_speakers,
-                max_speaker_count=max_speakers,
-            ) if diarization else None
-        ),
-    )
-
-    config = speech_v2.RecognitionConfig(
-        auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
-        language_codes=[lang],
-        model=model,
-        features=feats,
-    )
-
-    req = speech_v2.BatchRecognizeRequest(
-        recognizer=recognizer,
-        config=config,
-        files=[speech_v2.BatchRecognizeFileMetadata(uri=gcs_wav_uri)],
-        recognition_output_config=speech_v2.RecognitionOutputConfig(
-            inline_response_config=speech_v2.InlineOutputConfig()
-        ),
-    )
-
-    logger.info("🎧 Ejecutando BatchRecognize (LRO) en archivo grande: %s", gcs_wav_uri)
-    op = client.batch_recognize(request=req)
-    response = op.result(timeout=timeout_sec)
-
-    parts: list[str] = []
-    if response:
-        for result in response.results:
-            if result.alternatives:
-                parts.append(result.alternatives[0].transcript.strip())
-
-        text = "\n".join(p for p in parts if p).strip()
-        logger.info("✅ LRO completado (%d caracteres)", len(text))
-        return text
-    else:
-        logger.info("result esta vacio")
-        return ""
+    except GoogleAPICallError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"❌ Error crítico en transcripción: {e}")
+        raise e

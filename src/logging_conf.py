@@ -1,11 +1,13 @@
 # src/logging_conf.py
-from src.settings import WORK_DIR  # Reutilizamos ruta de trabajo
+from src.settings import settings
 
 import logging
 from pathlib import Path
 
+
+
 # Ruta del archivo de log (opcional)
-LOG_FILE = WORK_DIR / "app.log"
+LOG_FILE = settings.work_dir / "app.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 def setup_logging(level: str = "INFO") -> None:
     """

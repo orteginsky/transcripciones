@@ -10,7 +10,6 @@ from src.logging_conf import get_logger
 
 logger = get_logger(__name__)
 
-# Si ya tienes PipelineError en otro módulo, impórtalo.
 try:
     from src.orchestration.runner import PipelineError
 except Exception:
@@ -49,5 +48,4 @@ class ErrorMiddleware(BaseHTTPMiddleware):
             )
 
 def register_exception_handlers(app) -> None:
-    # Si prefieres, además del middleware puedes registrar handlers específicos.
     app.add_middleware(ErrorMiddleware)

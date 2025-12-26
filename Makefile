@@ -1,6 +1,6 @@
 IMAGE_NAME=vertex-audio-app
 REGION=us-central1
-PROJECT_ID?=woven-operative-419903
+PROJECT_ID?=ortega-473114
 
 build:
 \tdocker build -t $(IMAGE_NAME) .

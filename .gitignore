@@ -33,12 +33,3 @@ __pycache__/
 # Otros archivos a ignorar
 *.pdf
 *.sqlite3
-
-# Archivos de documentación
-consideracionenv.txt
-
-# Archivos Basura
-prompts.txt
-test_document.txt
-pasos.txt
-algo.txt

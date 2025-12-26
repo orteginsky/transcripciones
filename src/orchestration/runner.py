@@ -1,259 +1,350 @@
-# src/orchestration/runner_to_doc.py
+# src/orchestration/runner.py
+"""
+Orquestador Principal del Pipeline de Transcripción.
+Este módulo coordina todo el flujo de trabajo:
+    1. Descarga de archivos desde Drive
+    2. Routing inteligente (decide qué motor usar)
+    3. Normalización condicional de audio
+    4. Transcripción (STT V1 o Gemini Flash)
+    5. Escritura en Google Docs
+    6. Callbacks a Google Sheets
+"""
 from __future__ import annotations
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
+import time
+import os
+import mimetypes
+import requests
 
 from google.cloud import storage
-import time
 
-from src.metrics import TRANSCRIPTIONS_TOTAL, TRANSCRIPTIONS_ERRORS_TOTAL, PIPELINE_DURATION_SECONDS, STT_PHASE_SECONDS
-from src.docs.google_docs_service import append_text_to_google_doc, append_formatted_transcript
+# Módulos Internos
+from src.logging_conf import get_logger
+from src.settings import settings
+from src.api.schemas import TranscriptionRequest
+
+# Router Inteligente
+from src.orchestration.router import decide_transcription_strategy, should_normalize_audio
+
+# Servicios de Infraestructura
+from src.storage.upload_service import save_drive_audio_to_gcs
 from src.storage.audio_normalizer_service import normalize_and_upload_gcs
 from src.storage.gcs_cleaner import delete_gcs_files
-from src.storage.upload_service import save_drive_audio_to_gcs
-from src.transcription.transcribers import transcribe_from_gcs_uri, stt_v2_transcribe_gcs_lro
-from src.transcription.gemini_vertex_transcriber import gemini_vertex_transcribe_gcs
 
-from src.logging_conf import get_logger
-from src.settings import GCS_BUCKET, get_settings
+# Servicios de Transcripción
+from src.transcription.transcribers import transcribe_from_gcs_uri as transcribe_stt_v1
+from src.transcription.vertex_service import transcribe_with_gemini
+from src.docs.google_docs_service import append_formatted_transcript
+from src.sheets.sheets_service import update_row_status, update_transcription_result
+
+# Métricas
+from src.metrics import (
+    TRANSCRIPTIONS_TOTAL,
+    TRANSCRIPTIONS_ERRORS_TOTAL,
+    PIPELINE_DURATION_SECONDS,
+    STT_PHASE_SECONDS
+)
 
 logger = get_logger(__name__)
 
-ALLOWED_TRANSCRIBERS = {"gemini_vertex", "stt_v2"}
-
-class PipelineError(RuntimeError):
-    code: str = "INTERNAL"
-    def __init__(self, message: str, code: str = "INTERNAL", details: dict | None = None):
-        super().__init__(message)
+class PipelineError(Exception):
+    """Error personalizado del pipeline con código de error"""
+    def __init__(self, message: str, code: str = "INTERNAL"):
+        self.message = message
         self.code = code
-        self.details = details or {}
+        super().__init__(self.message)
 
-def run_transcription_pipeline_to_doc(
-    *,
-    case_id: str,
-    title: str,
-    media_link: str,
-    doc_id: str,
-    language_code: Optional[str] = None,
-    bucket_name: Optional[str] = None,
-    transcriber_override: Optional[str] = None,
-) -> Dict[str, Any]:
-    start = time.time()  # ⏱ inicio del pipeline
 
-    logger.info("🚀 Pipeline->Doc | case_id=%s doc_id=%s", case_id, doc_id)
-    s = get_settings()
+def _ensure_storage_client():
+    """Configura y retorna el cliente de Google Cloud Storage"""
+    if settings.google_application_credentials and "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
+        if os.path.exists(settings.google_application_credentials):
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.google_application_credentials
+    return storage.Client(project=settings.gcp_project_id)
 
-    bucket_name = bucket_name or GCS_BUCKET
-    if not bucket_name:
-        raise PipelineError("GCS_BUCKET vacío.", code="BAD_REQUEST")
 
-    backend = (transcriber_override or (s.transcriber or "stt_v2")).lower().strip()
-    if backend not in ALLOWED_TRANSCRIBERS:
-        raise PipelineError(f"Transcriber no soportado: '{backend}'", code="BAD_REQUEST")
-    language_code = (language_code or s.stt_language_code or "es-ES")
+def _parse_gemini_output(text: str) -> str:
+    """
+    Convierte la salida Markdown de Gemini al formato interno |SEPARATOR|
+    usado por el sistema de documentos.
+    """
+    text = text.replace("**", "")
+    formatted_blocks = []
+    lines = text.split('\n')
 
-    storage_client = storage.Client()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        if ":" in line:
+            # Búsqueda heurística de hablante
+            parts = line.split(":", 1)
+            speaker_info = parts[0].strip()
+            content = parts[1].strip()
+            formatted_blocks.append(f"{speaker_info}:|SEPARATOR|{content}")
+        else:
+            formatted_blocks.append(f"{line}")
+
+    return "\n\n".join(formatted_blocks)
+
+
+def _guess_mime_type(gcs_uri: str) -> str:
+    """Adivina el tipo MIME basado en la extensión para Vertex AI."""
+    mime, _ = mimetypes.guess_type(gcs_uri)
+    if not mime:
+        # Fallbacks comunes si mimetypes falla
+        if gcs_uri.endswith(".mp3"):
+            return "audio/mpeg"
+        if gcs_uri.endswith(".wav"):
+            return "audio/wav"
+        if gcs_uri.endswith(".m4a"):
+            return "audio/mp4"
+        if gcs_uri.endswith(".mp4"):
+            return "video/mp4"
+        if gcs_uri.endswith(".flac"):
+            return "audio/flac"
+        return "audio/mpeg"  # Default genérico
+    return mime
+
+
+def _format_engine_name(engine: str) -> str:
+    """Formatea el nombre del motor para visualización"""
+    engine_names = {
+        "stt_v1": "STT V1 Stereo",
+        "gemini_flash": "gemini-3-flash-preview",
+        "gemini_pro": "Gemini 2.5 Pro"
+    }
+    return engine_names.get(engine, engine)
+
+
+# ==============================================================================
+# ORQUESTADOR PRINCIPAL
+# ==============================================================================
+
+def run_transcription_pipeline(request: TranscriptionRequest) -> Dict[str, Any]:
+    """
+    Orquesta todo el proceso de transcripción con routing inteligente.
+
+    Flujo:
+    1. Descarga archivo de Drive → GCS (raw)
+    2. Router decide estrategia (STT V1 vs Gemini)
+    3. Normalización condicional (solo si es necesario)
+    4. Transcripción con motor seleccionado
+    5. Escritura en Google Docs
+    6. Callbacks a Google Sheets (status, motor, duración, etc.)
+    7. Limpieza de archivos temporales
+
+    Args:
+        request: TranscriptionRequest con toda la configuración
+
+    Returns:
+        Dict con el resultado del pipeline
+    """
+    start_time = time.time()
     uris_creados: List[str] = []
 
+    ctx = f"case={request.case_id} doc={request.doc_id}"
+    logger.info(f"🚀 Iniciando Pipeline ({ctx})")
+
+    storage_client = _ensure_storage_client()
+
     try:
-        # 1) Drive -> GCS
-        gcs_media_uri = save_drive_audio_to_gcs(media_link, case_id)
-        uris_creados.append(gcs_media_uri)
-        logger.info("📤 Media subido a GCS: %s", gcs_media_uri)
+        # ---------------------------------------------------------
+        # PASO 1: Descarga de Drive
+        # ---------------------------------------------------------
+        drive_link = request.drive_file_id
+        if "http" not in drive_link:
+            drive_link = f"https://drive.google.com/uc?id={request.drive_file_id}"
 
-        # 2) Elegir input según backend
-        if backend == "gemini_vertex":
-            # ⚡️ Evita WAV grande: usa MP3 directo para Gemini
-            gcs_input_uri = gcs_media_uri
-            input_mime = "audio/mpeg"  # si la fuente es MP3
-            logger.info("⏭️ Gemini usará el MP3 directo (sin normalización).")
-        else:
-            # STT v2 -> normaliza a FLAC (más ligero) y ajusta SR automáticamente si es telefónico
-            gcs_input_uri = normalize_and_upload_gcs(
-                gcs_media_uri, case_id, bucket_name, target_format="flac", auto_sr=True
-            )
-            uris_creados.append(gcs_input_uri)
-            input_mime = "audio/flac"
-            logger.info("🎛️ Audio normalizado a FLAC: %s", gcs_input_uri)
+        logger.info("📥 [1/5] Descargando archivo de Drive...")
+        gcs_raw_uri = save_drive_audio_to_gcs(drive_link, request.case_id)
+        uris_creados.append(gcs_raw_uri)
+        logger.info(f"✅ Archivo en GCS: {gcs_raw_uri}")
 
-        # 3) Transcribir
-        logger.info("📝 Transcribiendo con backend=%s | lang=%s…", backend, language_code)
-        prompt_text = getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None)
-        transcription_text: str = ""
-
-        stt_start = time.time()
-        try:
-            if backend == "gemini_vertex":
-                transcription_text = gemini_vertex_transcribe_gcs(
-                    gcs_input_uri,
-                    prompt=prompt_text,
-                    mime_type=input_mime,
-                )
-                logger.info("Se utilizó Gemini (Vertex).")
+        # ---------------------------------------------------------
+        # PASO 2: Router Inteligente
+        # ---------------------------------------------------------
+        logger.info("🧠 [2/5] Ejecutando router inteligente...")
+        if request.strategy != "auto":
+            logger.info(f"⚙️ Estrategia manual: {request.strategy}")
+            if request.strategy == "stt_v1_stereo":
+                engine = "stt_v1"
+                requires_normalization = True
+                target_channels = 2
+                reason = "Estrategia manual: STT V1 Stereo"
+            elif "gemini" in request.strategy:
+                engine = "gemini_flash"
+                requires_normalization = False
+                target_channels = 1
+                reason = f"Estrategia manual: {request.strategy}"
             else:
-                transcription_text = transcribe_from_gcs_uri(
-                    gcs_input_uri, language_code=language_code
+                raise PipelineError(f"Estrategia no reconocida: {request.strategy}")
+            
+            from src.orchestration.router import RoutingDecision
+            decision = RoutingDecision(engine=engine, requires_normalization=requires_normalization, target_channels=target_channels, reason=reason)
+        else:
+            decision = decide_transcription_strategy(request, gcs_raw_uri)
+
+        logger.info(f"✅ Motor seleccionado: {_format_engine_name(decision.engine)}")
+
+        # ---------------------------------------------------------
+        # PASO 3: Normalización
+        # ---------------------------------------------------------
+        logger.info("🎛️ [3/5] Evaluando necesidad de normalización...")
+        gcs_input_uri = gcs_raw_uri 
+
+        if decision.requires_normalization:
+            logger.info(f"🔧 Normalizando audio (canales: {decision.target_channels})...")
+            if decision.engine == "stt_v1":
+                gcs_input_uri = normalize_and_upload_gcs(
+                    gcs_raw_uri, request.case_id,
+                    bucket_name=request.bucket_name or settings.gcs_bucket,
+                    target_format="flac", target_channels=decision.target_channels,
+                    auto_sr=True, force_normalize=True
                 )
-                logger.info("Se utilizó Speech-to-Text v2.")
-        finally:
-            STT_PHASE_SECONDS.labels(backend=backend).observe(time.time() - stt_start)
+            else:
+                if should_normalize_audio(decision, gcs_raw_uri):
+                    gcs_input_uri = normalize_and_upload_gcs(
+                        gcs_raw_uri, request.case_id,
+                        bucket_name=request.bucket_name or settings.gcs_bucket,
+                        target_format="mp3", target_channels=1,
+                        auto_sr=False, force_normalize=False
+                    )
+            if gcs_input_uri != gcs_raw_uri:
+                uris_creados.append(gcs_input_uri)
+                logger.info(f"✅ Audio normalizado: {gcs_input_uri}")
+        else:
+            logger.info("⚡ Bypass de normalización - usando archivo raw")
+
+        # ---------------------------------------------------------
+        # PASO 4: Transcripción
+        # ---------------------------------------------------------
+        logger.info(f"📝 [4/5] Transcribiendo con {_format_engine_name(decision.engine)}...")
+        stt_start = time.time()
+        transcription_text = ""
+
+        if decision.engine == "stt_v1":
+            transcription_text = transcribe_stt_v1(gcs_input_uri, language_code=request.language_code)
+        elif decision.engine in ["gemini_flash", "gemini_pro"]:
+            model_name = settings.gemini_vertex 
+            mime_type = _guess_mime_type(gcs_input_uri)
+            logger.info(f"📤 Enviando a Gemini (mime: {mime_type})")
+            raw_gemini_text = transcribe_with_gemini(gcs_input_uri, model_name=model_name, mime_type=mime_type)
+            transcription_text = _parse_gemini_output(raw_gemini_text)
+        else:
+            raise PipelineError(f"Motor no implementado: {decision.engine}")
+
+        stt_duration = time.time() - stt_start
+        STT_PHASE_SECONDS.labels(backend=decision.engine).observe(stt_duration)
 
         if not transcription_text.strip():
-            raise PipelineError("La transcripción resultó vacía o nula.", code="STT_FAILED")
+            raise PipelineError("La transcripción resultó vacía.", code="STT_FAILED")
 
-        # 4) Guardar .txt en GCS (opcional/auditoría)
-        #    Tomamos el 'stem' del blob key de la URI gs://bucket/key.ext
+        # Guardar respaldo TXT
         try:
             _, key = gcs_input_uri.replace("gs://", "").split("/", 1)
-        except ValueError:
-            key = "transcription"
-        stem = PurePosixPath(key).stem
+            stem = PurePosixPath(key).stem
+            txt_blob_path = f"transcripts/{request.case_id}/{stem}_{decision.engine}.txt"
+            bucket = storage_client.bucket(request.bucket_name or settings.gcs_bucket)
+            bucket.blob(txt_blob_path).upload_from_string(transcription_text, content_type="text/plain")
+            logger.info(f"💾 Respaldo TXT guardado: gs://{bucket.name}/{txt_blob_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo guardar respaldo TXT: {e}")
 
-        txt_blob_path = f"transcripts/{case_id}/{stem}_transcription.txt"
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(txt_blob_path)
-        blob.upload_from_string(transcription_text, content_type="text/plain")
-        logger.info("🧾 Transcripción guardada en GCS: gs://%s/%s", bucket_name, txt_blob_path)
+        # ---------------------------------------------------------
+        # PASO 5: Google Docs
+        # ---------------------------------------------------------
+        logger.info("📄 [5/5] Escribiendo en Google Docs...")
+        append_formatted_transcript(doc_id=request.doc_id, title=request.title, transcript_text=transcription_text)
+        doc_url = f"https://docs.google.com/document/d/{request.doc_id}/edit"
+        logger.info(f"✅ Doc actualizado: {doc_url}")
 
-        # 5) APPEND en Doc existente
-        #append_text_to_google_doc(doc_id=doc_id, content=transcription_text)
-        append_formatted_transcript(doc_id=doc_id, title=title, transcript_text=transcription_text)
-        logger.info("📄 Transcripción insertada en Doc %s", doc_id)
-
-        # 6) Limpieza
-        _ = delete_gcs_files(uris_creados)
-        logger.info("🧹 Temporales GCS eliminados.")
-
-        duration = time.time() - start
-        PIPELINE_DURATION_SECONDS.observe(duration)
-        TRANSCRIPTIONS_TOTAL.labels(backend=backend).inc()
-
-        result = {
-            "case_id": case_id,
-            "title": title,
-            "backend": backend,
-            "doc_id": doc_id,
-            "duration_ms": int(duration * 1000),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        logger.info("✅ Pipeline completado | case_id=%s | duration_ms=%s", case_id, result["duration_ms"])
-        return result
-
-    except PipelineError as e:
-        TRANSCRIPTIONS_ERRORS_TOTAL.labels(code=e.code).inc()
-        raise
-    except Exception:
-        TRANSCRIPTIONS_ERRORS_TOTAL.labels(code="INTERNAL").inc()
-        raise
-
-
-def run_transcription_pipeline_from_gcs(
-    *,
-    case_id: str,
-    title: str,
-    gcs_media_uri: str,          # 👈 ya tenemos MP3 en GCS
-    doc_id: str,
-    language_code: Optional[str] = None,
-    bucket_name: Optional[str] = None,
-    transcriber_override: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Variante del pipeline que parte de un audio YA en GCS (MP3).
-    Ideal para videos → extraer MP3 → subir a GCS → transcribir.
-    """
-    start = time.time()
-    s = get_settings()
-
-    bucket_name = bucket_name or GCS_BUCKET
-    if not bucket_name:
-        raise PipelineError("GCS_BUCKET vacío.", code="BAD_REQUEST")
-
-    backend = (transcriber_override or (s.transcriber or "stt_v2")).lower().strip()
-    if backend not in {"gemini_vertex", "stt_v2"}:
-        raise PipelineError(f"Transcriber no soportado: '{backend}'", code="BAD_REQUEST")
-
-    storage_client = storage.Client()
-    uris_creados: List[str] = []
-    uris_creados.append(gcs_media_uri)
-
-    try:
-        # Selección de input
-        if backend == "gemini_vertex":
-            gcs_input_uri = gcs_media_uri            # MP3 directo
-            input_mime = "audio/mpeg"
-            logger.info("⏭️ Gemini usará MP3 directo: %s", gcs_input_uri)
-        else:
-            # STT: usa normalización si está activada; si no, MP3 directo
-            if getattr(s, "NORMALIZE_FOR_STT", True):
-                gcs_input_uri = normalize_and_upload_gcs(
-                    gcs_media_uri, case_id, bucket_name, target_format=getattr(s, "STT_TARGET_CODEC", "flac"), auto_sr=True
-                )
-                uris_creados.append(gcs_input_uri)
-                input_mime = "audio/flac" if getattr(s, "STT_TARGET_CODEC", "flac") == "flac" else "audio/wav"
-                logger.info("🎛️ Audio normalizado: %s", gcs_input_uri)
-            else:
-                gcs_input_uri = gcs_media_uri
-                input_mime = "audio/mpeg"
-                logger.info("⏭️ STT usará MP3 directo (NORMALIZE_FOR_STT=false).")
-
-        # Transcripción
-        logger.info("📝 Transcribiendo con backend=%s | lang=%s…", backend, (language_code or s.stt_language_code))
-        prompt_text = getattr(s, "TRANSCRIPTION_PROMPT_TEMPLATE", None)
-        transcription_text: str = ""
-
-        stt_start = time.time()
-        if backend == "gemini_vertex":
-            transcription_text = gemini_vertex_transcribe_gcs(
-                gcs_input_uri, prompt=prompt_text, mime_type=input_mime
-            )
-            logger.info("Se utilizó Gemini (Vertex).")
-        else:
-            # Usa tu facade actual (elige STT v2 internamente)
-            transcription_text = transcribe_from_gcs_uri(
-                gcs_input_uri,
-                # si tu transcribe_from_gcs_uri acepta language/diarization pásalos; si no, respeta tu firma actual
-            )
-            logger.info("Se utilizó Speech-to-Text v2.")
-
-        STT_PHASE_SECONDS.labels(backend=backend).observe(time.time() - stt_start)
-
-        if not transcription_text.strip():
-            raise PipelineError("La transcripción resultó vacía o nula.", code="STT_FAILED")
-
-        # Guardar .txt
-        stem = PurePosixPath(gcs_input_uri).stem
-        txt_blob_path = f"transcripts/{case_id}/{stem}_transcription.txt"
-        bucket = storage_client.bucket(bucket_name)
-        bucket.blob(txt_blob_path).upload_from_string(transcription_text, content_type="text/plain")
-        logger.info("🧾 Transcripción guardada en GCS: gs://%s/%s", bucket_name, txt_blob_path)
-
-        # Formatear e insertar en Doc
-        append_formatted_transcript(doc_id=doc_id, title=title, transcript_text=transcription_text)
-        logger.info("📄 Transcripción insertada en Doc %s", doc_id)
+        # Callbacks Sheets
+        if request.sheet_callback:
+            logger.info("📊 Actualizando Google Sheets...")
+            cb = request.sheet_callback
+            update_data = {
+                "doc_url": doc_url, "status": "✅ Transcrito",
+                "engine": _format_engine_name(decision.engine),
+                "duration_seconds": time.time() - start_time,
+                "transcript_doc_col": cb.transcript_doc_col, "status_col": cb.status_col
+            }
+            try:
+                update_transcription_result(cb.spreadsheet_id, cb.sheet_name, cb.row_index, update_data)
+            except Exception as e:
+                logger.error(f"❌ Error actualizando Sheets: {e}")
 
         # Limpieza
+        logger.info("🧹 Limpiando archivos temporales...")
         delete_gcs_files(uris_creados)
-        logger.info("🧹 Temporales GCS eliminados.")
 
-        duration = time.time() - start
-        PIPELINE_DURATION_SECONDS.observe(duration)
-        TRANSCRIPTIONS_TOTAL.labels(backend=backend).inc()
+        # Métricas
+        total_duration = time.time() - start_time
+        PIPELINE_DURATION_SECONDS.observe(total_duration)
+        TRANSCRIPTIONS_TOTAL.labels(backend=decision.engine).inc()
 
-        result = {
-            "case_id": case_id,
-            "title": title,
-            "backend": backend,
-            "doc_id": doc_id,
-            "duration_ms": int(duration * 1000),
-            "timestamp": datetime.utcnow().isoformat(),
+        # ---------------------------------------------------------
+        # PASO 6: ENCOLAR SIGUIENTE SERVICIO (Generic Chaining)
+        # ---------------------------------------------------------
+        if request.next_step_task:
+            next_step = request.next_step_task
+            logger.info(f"🔄 Encolando siguiente paso hacia: {next_step.target_service_name}")
+            
+            # 1. Copiar plantilla original
+            next_payload = next_step.payload_template.copy()
+            
+            # 2. Inyectar resultados estándar
+            next_payload.update({
+                "transcription_doc_id": request.doc_id,
+                "transcription_doc_url": doc_url,
+                "case_id": request.case_id,
+                "source_file_id": request.drive_file_id,
+                "status": "transcription_completed"
+            })
+            
+            # 3. Empaquetar para Enqueuer
+            enqueuer_payload = {
+                "service": next_step.target_service_name,
+                "payload": next_payload
+            }
+            
+            try:
+                # Usamos la librería 'requests' importada al inicio
+                response = requests.post(
+                    str(next_step.enqueuer_url),
+                    json=enqueuer_payload,
+                    timeout=10 
+                )
+                response.raise_for_status()
+                logger.info(f"✅ Tarea para '{next_step.target_service_name}' encolada.")
+            except Exception as e:
+                # Loggeamos error pero NO detenemos el pipeline, ya que la transcripción fue exitosa
+                logger.error(f"❌ Error al encolar siguiente paso: {e}")
+
+        # FINAL
+        logger.info(f"🎉 Pipeline completado exitosamente en {total_duration:.1f}s")
+
+        return {
+            "case_id": request.case_id,
+            "doc_id": request.doc_id,
+            "doc_url": doc_url,
+            "status": "success",
+            "backend_display_name": _format_engine_name(decision.engine),
+            "backend_used": decision.engine,
+            "duration_seconds": total_duration,
+            "timestamp": datetime.utcnow().isoformat()
         }
-        logger.info("✅ Pipeline (from GCS) completado | case_id=%s | duration_ms=%s", case_id, result["duration_ms"])
-        return result
-
-    except PipelineError as e:
-        TRANSCRIPTIONS_ERRORS_TOTAL.labels(code=e.code).inc()
-        raise
-    except Exception:
-        TRANSCRIPTIONS_ERRORS_TOTAL.labels(code="INTERNAL").inc()
-        raise
+    
+    except Exception as e:
+        logger.error(f"❌ Error en Pipeline: {e}", exc_info=True)
+        TRANSCRIPTIONS_ERRORS_TOTAL.labels(code=getattr(e, 'code', 'INTERNAL')).inc()
+        if request.sheet_callback and request.sheet_callback.status_col:
+            try:
+                cb = request.sheet_callback
+                update_row_status(cb.spreadsheet_id, cb.sheet_name, cb.row_index, cb.status_col, f"❌ Error: {str(e)[:100]}")
+            except Exception:
+                pass
+        raise e
