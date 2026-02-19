@@ -11,6 +11,8 @@ BackendStrategy = Literal[
     "gemini_pro"
 ]
 
+Proveedores = Literal["google_drive", "dropbox"]
+
 class SheetCallbackConfig(BaseModel):
     """Configuración para escribir el resultado en una Google Sheet"""
     spreadsheet_id: str = Field(..., description="ID de la hoja de cálculo")
@@ -35,7 +37,8 @@ class TranscriptionRequest(BaseModel):
     title: str = Field(..., description="Título para el encabezado del Doc")
 
     # 2. Input (Fuente) - Soporta audio y video
-    drive_file_id: str = Field(..., description="ID del archivo en Drive (Audio: .mp3, .wav, .m4a / Video: .mp4)")
+    drive_file_id: Optional[str] = Field(..., description="ID del archivo en Drive (Audio: .mp3, .wav, .m4a / Video: .mp4)")
+    dropbox_file_path: Optional[str] = Field(..., description="ID del archivo en Drive (Audio: .mp3, .wav, .m4a / Video: .mp4)")
 
     # 3. Output Principal (Contenedor)
     doc_id: str = Field(..., description="ID del Google Doc donde se escribirá la transcripción")
