@@ -1,33 +1,36 @@
-import os
 from google import genai
 from google.genai import types
 
 from src.settings import settings
 from src.logging_conf import get_logger
+from src.ingestion.auth_service import get_oauth2_credentials
 
 logger = get_logger(__name__)
 
 def transcribe_with_gemini(
     gcs_uri: str,
     model_name: str = settings.gemini_vertex,
-    mime_type: str = "audio/mpeg"
+    mime_type: str = "audio/mpeg",
+    language_code: str = "es-MX"
 ) -> str:
     """
     Envía audio/video a Vertex AI usando el SDK unificado (Gen AI) v1.
+    Usa credenciales OAuth2 (token.json) para autenticarse contra el endpoint global.
     """
     try:
         logger.info(f"🤖 Inicializando cliente GenAI para modelo: {model_name}")
-        
-        # --- CAMBIO IMPORTANTE BASADO EN TU DOCUMENTACIÓN ---
-        # 1. Vertex AI requiere habilitar 'vertexai=True'.
-        # 2. Para modelos PREVIEW (como Gemini 3), es CRUCIAL usar 'v1beta1'.
-        # 3. location='us-central1' es donde tu script encontró el modelo.
-        
+
+        # Credenciales OAuth2 (token.json) — requerido para el endpoint global de Gemini 3.
+        creds = get_oauth2_credentials()
+
+        # location='global' es obligatorio para modelos Gemini 3 preview.
+        # api_version='v1beta1' es necesario para acceder a modelos en preview.
         client = genai.Client(
             vertexai=True,
             project=settings.gcp_project_id,
-            location=settings.gcp_region, # Debería ser 'us-central1' según tu .env
-            http_options={'api_version': 'v1beta1'}  # <--- ESTA ES LA CLAVE PARA EL ERROR 404
+            location=settings.gcp_region,   # default: "global" (settings.py)
+            credentials=creds,
+            http_options={"api_version": "v1beta1"},
         )
 
         # Preparar el archivo (Audio)
@@ -37,7 +40,7 @@ def transcribe_with_gemini(
         )
 
         # Preparar el Prompt
-        prompt_text = """
+        prompt_text = f"""
 Actúa como un transcriptor profesional experto. Transcribe el siguiente archivo de audio/video de forma LITERAL (verbatim).
 
 Instrucciones críticas:
@@ -46,6 +49,7 @@ Instrucciones críticas:
 3. Transcribe TODO literalmente: repeticiones, muletillas, pausas.
 4. Formato ESTRICTO por línea:
    [MM:SS] Hablante X: Texto completo...
+5. El idioma del audio es: {language_code}. La transcripción DEBE estar en ese idioma.
 """
         
         # Configuración del modelo (Gemini 3 soporta configuraciones avanzadas)

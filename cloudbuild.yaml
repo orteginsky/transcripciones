@@ -1,0 +1,55 @@
+# cloudbuild.yaml — Build, push y deploy a Cloud Run
+# Uso manual : gcloud builds submit --config cloudbuild.yaml .
+# Uso trigger : configurar trigger en Cloud Build apuntando a este archivo.
+#
+# Imagen destino : us-central1-docker.pkg.dev/ortega-473114/ai/transcripciones
+# Servicio CR    : transcripciones  (us-central1)
+# SA de deploy   : sa-transcriptor@ortega-473114.iam.gserviceaccount.com
+
+substitutions:
+  _REGION:  us-central1
+  _PROJECT: ortega-473114
+  _SERVICE: transcripciones
+  _IMAGE:   us-central1-docker.pkg.dev/ortega-473114/ai/transcripciones
+
+steps:
+  # ── 1. Build ──────────────────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - -t
+      - $_IMAGE:latest
+      - -t
+      - $_IMAGE:$SHORT_SHA
+      - .
+
+  # ── 2. Push ───────────────────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push
+    args:
+      - push
+      - --all-tags
+      - $_IMAGE
+    waitFor: [build]
+
+  # ── 3. Deploy ─────────────────────────────────────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - $_SERVICE
+      - --image=$_IMAGE:$SHORT_SHA
+      - --region=$_REGION
+      - --platform=managed
+      - --service-account=sa-transcriptor@$_PROJECT.iam.gserviceaccount.com
+    waitFor: [push]
+
+images:
+  - $_IMAGE:latest
+  - $_IMAGE:$SHORT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY

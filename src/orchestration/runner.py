@@ -232,7 +232,7 @@ def run_transcription_pipeline(request: TranscriptionRequest) -> Dict[str, Any]:
             model_name = settings.gemini_vertex 
             mime_type = _guess_mime_type(gcs_input_uri)
             logger.info(f"📤 Enviando a Gemini (mime: {mime_type})")
-            raw_gemini_text = transcribe_with_gemini(gcs_input_uri, model_name=model_name, mime_type=mime_type)
+            raw_gemini_text = transcribe_with_gemini(gcs_input_uri, model_name=model_name, mime_type=mime_type, language_code=request.language_code)
             transcription_text = _parse_gemini_output(raw_gemini_text)
         else:
             raise PipelineError(f"Motor no implementado: {decision.engine}")
