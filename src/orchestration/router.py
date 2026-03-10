@@ -8,14 +8,9 @@ This module determines which transcription engine to use based on:
 3. Source (8x8 calls vs other sources)
 """
 from __future__ import annotations
-from typing import Literal, Tuple
+from typing import Literal
 from dataclasses import dataclass
-from pathlib import Path
 import os
-import tempfile
-
-from google.cloud import storage
-from pydub import AudioSegment
 
 from src.logging_conf import get_logger
 from src.api.schemas import TranscriptionRequest
@@ -32,52 +27,6 @@ class RoutingDecision:
     target_channels: int
     reason: str
 
-def _get_audio_metadata(gcs_uri: str) -> Tuple[float, int]:
-    """
-    Downloads and analyzes audio/video file from GCS to extract:
-    - duration_minutes: Total duration in minutes
-    - channels: Number of audio channels (1=mono, 2=stereo)
-
-    Returns: (duration_minutes, channels)
-    """
-    storage_client = storage.Client()
-
-    # Parse GCS URI
-    parts = gcs_uri.replace("gs://", "").split("/", 1)
-    bucket_name = parts[0]
-    blob_name = parts[1]
-
-    with tempfile.TemporaryDirectory() as td:
-        # Download file
-        local_path = os.path.join(td, "temp_audio")
-        ext = os.path.splitext(blob_name)[1]
-        if ext:
-            local_path += ext
-
-        blob = storage_client.bucket(bucket_name).blob(blob_name)
-        blob.download_to_filename(local_path)
-
-        # Analyze with pydub
-        try:
-            audio = AudioSegment.from_file(local_path)
-            duration_minutes = len(audio) / 1000.0 / 60.0  # milliseconds -> minutes
-            channels = audio.channels
-
-            logger.info(f"📊 Audio metadata: {duration_minutes:.1f} min, {channels} ch")
-            return duration_minutes, channels
-        except Exception as e:
-            logger.warning(f"⚠️ Could not analyze audio metadata: {e}")
-            # Return safe defaults
-            return 0.0, 1
-
-
-def _is_video_file(gcs_uri: str) -> bool:
-    """Check if the file is a video based on extension"""
-    video_extensions = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
-    ext = os.path.splitext(gcs_uri.lower())[1]
-    return ext in video_extensions
-
-
 def decide_transcription_strategy(
     request: TranscriptionRequest,
     gcs_raw_uri: str
@@ -89,8 +38,6 @@ def decide_transcription_strategy(
     1. 8x8 Call -> STT V1 (Stereo forzado, Normalización Requerida).
     2. Todo lo demás -> Gemini Flash (Bypass de normalización por defecto).
     
-    NOTA: Eliminamos el análisis de duración/canales previo porque descargar el archivo
-    para analizarlo consumía el tiempo que queríamos ahorrar.
     """
 
     # Regla 1: Llamadas 8x8 (Infraestructura Legacy/Stereo)

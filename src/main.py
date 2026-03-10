@@ -52,10 +52,11 @@ def health_check():
 def whoami():
     try:
         from src.ingestion.auth_service import get_google_creds_service
-        _, _, creds = get_google_creds_service()
+        _, _, _, creds = get_google_creds_service()
         return {
-            "auth_mode": "service_account",
-            "principal": getattr(creds, "service_account_email", "unknown"),
+            "auth_mode": "oauth2",
+            "principal": getattr(creds, "client_id", "unknown"),
+            "valid": getattr(creds, "valid", None),
             "engine": "stt_v1"
         }
     except Exception as e:

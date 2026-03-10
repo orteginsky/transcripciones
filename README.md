@@ -13,7 +13,7 @@ Servicio FastAPI que transcribe audios y videos de Google Drive con **enrutamien
 5. **Actualiza Google Sheets** con resultados (estado, enlace, motor usado, duración)
 6. Expone **/metrics** (Prometheus), **/health** y **/docs**
 
-> **Cuenta de servicio**: `drive-sheets@ortega-473114.iam.gserviceaccount.com`
+> **Cuenta de servicio**: `sa-transcriptor@ortega-473114.iam.gserviceaccount.com`
 
 ---
 
@@ -24,12 +24,12 @@ src/
   api/
     main.py                    # FastAPI app principal
     routes.py                  # POST /api/transcribe (endpoint único)
-    schemas.py                 # TranscriptionRequest, TranscriptionResponse
+    schemas.py                 # TranscriptionRequest, TranscriptionResponse, callbacks
     error_handler.py           # Manejo global de errores
   docs/
     google_docs_service.py     # Escribe transcripciones en Google Docs
   ingestion/
-    audio_processor.py         # Descarga desde Drive y extrae metadata
+    drive_loader.py            # Descarga desde Google Drive y extrae metadata
     auth_service.py            # Credenciales Service Account (Drive/Docs/Sheets)
   orchestration/
     runner.py                  # Pipeline principal: run_transcription_pipeline
@@ -39,10 +39,11 @@ src/
   storage/
     audio_normalizer_service.py# Normalización condicional a FLAC/WAV
     gcs_uploader.py            # Sube archivos a GCS
-    upload_service.py          # Servicio de carga
+    gcs_cleaner.py             # Limpieza de archivos temporales en GCS
+    upload_service.py          # Servicio de carga (Drive → GCS)
   transcription/
     transcribers.py            # Motores: Gemini Flash, STT V1 Stereo/Mono
-    vertex_service.py          # Cliente Vertex AI
+    vertex_service.py          # Cliente Vertex AI / Gemini
   tools/
     manage_recognizer.py       # CLI para gestionar recognizers de STT
   logging_conf.py
@@ -155,7 +156,7 @@ El sistema selecciona automáticamente el mejor motor según las característica
 
 ## 🔐 Variables de entorno (.env)
 
-Configuración mínima:
+Copia `.env.example` como `.env` y edita los valores:
 
 ```env
 # --- GCP / Credenciales ---
@@ -167,22 +168,39 @@ GOOGLE_APPLICATION_CREDENTIALS=./credencial/sa.json
 USE_GCS=true
 GCS_BUCKET=my-bucket-out
 GCS_BUCKET_OUTPUT=my-bucket-out
+GCS_UPLOAD_CHUNK_MB=64
 
 # --- Motor de transcripción por defecto ---
 TRANSCRIBER_ENGINE=stt_v1_stereo  # stt_v1_stereo | gemini_flash
+
+# --- Gemini (modelo configurable) ---
+GEMINI_VERTEX=gemini-3-flash-preview  # Modelo a usar en Vertex AI
 
 # --- Speech-to-Text ---
 STT_LANGUAGE_CODE=es-MX
 STT_ENABLE_DIARIZATION=true
 STT_MIN_SPEAKERS=2
 STT_MAX_SPEAKERS=2
-SPEECH_LOCATION=us-central1
+SPEECH_LOCATION=global
 SPEECH_RECOGNIZER=projects/ortega-473114/locations/us-central1/recognizers/tmf-recognizer
 
 # --- Rutas locales ---
 INPUT_DIR=./data/input
 WORK_DIR=./data/work
 OUTPUT_DIR=./data/output
+MP3_SOURCE_DIR=./data/mp3
+WAV_OUTPUT_DIR=./data/wav16k
+
+# --- Procesamiento de audio ---
+NORMALIZE_TARGET_DB=-20
+SILENCE_THRESHOLD=0.01
+
+# --- Prompts ---
+TRANSCRIPTION_PROMPT_FILE=./src/domain/prompts/transcription_prompt.md.j2
+
+# --- PDF (opcional) ---
+PDF_FOOTER_TEXT=Generado por TMF Audio Transcription
+PDF_HEADER_TEXT=
 ```
 
 > **Importante**: No subas `sa.json` ni `.env` al repositorio.
@@ -232,6 +250,7 @@ Acepta audios y videos de Google Drive, con enrutamiento inteligente automático
   "strategy": "auto",
   "language_code": "es-MX",
   "is_8x8_call": false,
+  "bucket_name": null,
   "sheet_callback": {
     "spreadsheet_id": "1sheet789xyz",
     "sheet_name": "Transcripciones",
@@ -240,19 +259,22 @@ Acepta audios y videos de Google Drive, con enrutamiento inteligente automático
     "status_col": "F",
     "engine_col": "G",
     "duration_col": "H"
-  }
+  },
+  "next_step_task": null
 }
 ```
 
 **Campos**:
 - `case_id`: Identificador único del caso
 - `title`: Título para el documento
-- `drive_file_id`: ID del archivo en Drive (extraído de la URL)
+- `drive_file_id`: ID del archivo en Google Drive (o URL completa; se extrae automáticamente)
 - `doc_id`: ID del Google Doc de destino
-- `strategy`: Estrategia de routing (`"auto"`, `"gemini_flash"`, `"stt_v1_stereo"`)
+- `strategy`: Estrategia de routing (`"auto"`, `"gemini_flash"`, `"gemini_pro"`, `"stt_v1_stereo"`)
 - `language_code`: Idioma del audio (opcional, default: `"es-MX"`)
 - `is_8x8_call`: Forzar STT V1 para llamadas 8x8 (opcional, default: `false`)
+- `bucket_name`: Bucket GCS a usar (opcional, usa el configurado en settings por defecto)
 - `sheet_callback`: Configuración para actualizar Google Sheets (opcional)
+- `next_step_task`: Configuración para encolar la siguiente tarea vía Enqueuer (opcional)
 
 **Response**:
 
@@ -289,15 +311,15 @@ El router selecciona el mejor motor basándose en:
 Puedes forzar un motor específico:
 
 ```json
-{
-  "strategy": "gemini_flash"    // Forzar Gemini
-}
+{ "strategy": "gemini_flash" }    // Gemini Flash (rápido, económico)
 ```
 
 ```json
-{
-  "strategy": "stt_v1_stereo"   // Forzar STT V1
-}
+{ "strategy": "gemini_pro" }      // Gemini Pro (mayor capacidad)
+```
+
+```json
+{ "strategy": "stt_v1_stereo" }   // STT V1 con diarización estéreo
 ```
 
 ### 3. Llamadas 8x8
@@ -307,6 +329,26 @@ Para llamadas telefónicas de 8x8 (siempre en estéreo):
 ```json
 {
   "is_8x8_call": true  // Fuerza STT V1 Stereo automáticamente
+}
+```
+
+---
+
+## 🔗 Encadenamiento de servicios (Service Chaining)
+
+Una vez terminada la transcripción, puedes encolar la siguiente tarea en un servicio Enqueuer genérico:
+
+### Cola de tareas (`next_step_task`)
+
+Encola la siguiente tarea en un servicio Enqueuer genérico:
+
+```json
+{
+  "next_step_task": {
+    "enqueuer_url": "https://enqueuer.run.app/enqueue",
+    "target_service_name": "analisis-legal",
+    "payload_template": { "extra_key": "extra_value" }
+  }
 }
 ```
 
@@ -547,6 +589,13 @@ Proyecto interno de TMF.
 ---
 
 ## 📊 Changelog
+
+### v2.1 (Febrero 2026)
+- ✨ Nueva estrategia `"gemini_pro"` para mayor capacidad de análisis
+- ✨ **Service chaining**: encadenamiento via webhook (`next_service_callback`) y cola de tareas (`next_step_task`)
+- ✨ Campo `bucket_name` para sobreescribir el bucket GCS por petición
+- ✨ Modelo Gemini configurable mediante variable de entorno `GEMINI_VERTEX`
+- 📝 Actualización y corrección de schemas
 
 ### v2.0 (Diciembre 2025)
 - ✨ Enrutamiento inteligente automático de motores

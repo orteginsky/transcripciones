@@ -1,17 +1,15 @@
-# src/domain/schemas.py
+# src/api/schemas.py
 from __future__ import annotations
 from pydantic import BaseModel, Field, field_validator, HttpUrl
-from typing import Optional, Literal, Dict, Any, List
+from typing import Optional, Literal, Dict, Any
 
 # --- Enums y Tipos ---
 BackendStrategy = Literal[
-    "auto", 
-    "stt_v1_stereo", 
+    "auto",
+    "stt_v1_stereo",
     "gemini_flash",
     "gemini_pro"
 ]
-
-Proveedores = Literal["google_drive", "dropbox"]
 
 class SheetCallbackConfig(BaseModel):
     """Configuración para escribir el resultado en una Google Sheet"""
@@ -23,11 +21,11 @@ class SheetCallbackConfig(BaseModel):
     engine_col: Optional[str] = Field(None, description="Columna para motor usado (ej: 'G')")
     duration_col: Optional[str] = Field(None, description="Columna para duración (ej: 'H')")
 
-class WebhookCallbackConfig(BaseModel):
-    """Configuración para llamar a otro microservicio (Chaining)"""
-    url: HttpUrl = Field(..., description="URL del siguiente servicio (ej. 'brain')")
+class EnqueueNextStepConfig(BaseModel):
+    """Configuración genérica para encadenar CUALQUIER servicio"""
+    enqueuer_url: HttpUrl = Field(..., description="URL del Enqueuer")
+    target_service_name: str = Field(..., description="Nombre del servicio destino en el Enqueuer")
     payload_template: Dict[str, Any] = Field(default_factory=dict, description="Datos extra para pasar al siguiente servicio")
-    token_audience: Optional[str] = Field(None, description="Audience para firmar token OIDC si es necesario")
 
 # --- Request Principal ---
 
@@ -36,9 +34,8 @@ class TranscriptionRequest(BaseModel):
     case_id: str = Field(..., description="ID único del caso/cliente (usado para carpetas en GCS)")
     title: str = Field(..., description="Título para el encabezado del Doc")
 
-    # 2. Input (Fuente) - Soporta audio y video
+    # 2. Input (Fuente)
     drive_file_id: Optional[str] = Field(..., description="ID del archivo en Drive (Audio: .mp3, .wav, .m4a / Video: .mp4)")
-    dropbox_file_path: Optional[str] = Field(..., description="ID del archivo en Drive (Audio: .mp3, .wav, .m4a / Video: .mp4)")
 
     # 3. Output Principal (Contenedor)
     doc_id: str = Field(..., description="ID del Google Doc donde se escribirá la transcripción")
@@ -55,20 +52,19 @@ class TranscriptionRequest(BaseModel):
     language_code: str = Field(default="es-MX", description="Código de idioma para STT")
     bucket_name: Optional[str] = Field(None, description="Bucket GCS (opcional, usa settings por defecto)")
 
-    # 5. Callbacks (Conexión con Sheets y otros servicios)
+    # 5. Callbacks
     sheet_callback: Optional[SheetCallbackConfig] = Field(
         None,
         description="Configuración para actualizar Google Sheets con el resultado"
     )
-    next_service_callback: Optional[WebhookCallbackConfig] = None
     next_step_task: Optional[EnqueueNextStepConfig] = None
+
     @field_validator('drive_file_id')
     def extract_drive_id(cls, v):
         # Si App Script manda el link completo por error, lo limpiamos
-        if "id=" in v:
-            # Lógica simple de split (puedes mejorarla con regex)
+        if v and "id=" in v:
             return v.split("id=")[1].split("&")[0]
-        if "/d/" in v:
+        if v and "/d/" in v:
             return v.split("/d/")[1].split("/")[0]
         return v
 
@@ -81,19 +77,8 @@ class TranscriptionResponse(BaseModel):
     duration_seconds: float
     status: Literal["success", "error"]
     timestamp: str
-    output_files: Dict[str, str] = Field(default_factory=dict) 
+    output_files: Dict[str, str] = Field(default_factory=dict)
 
 class ErrorResponse(BaseModel):
     detail: str
     code: str
-
-
-class EnqueueNextStepConfig(BaseModel):
-    """Configuración genérica para encadenar CUALQUIER servicio"""
-    enqueuer_url: HttpUrl = Field(..., description="URL del Enqueuer")
-    
-    # Nombre del servicio destino en el Enqueuer (puede ser 'testimonios', 'analisis-legal', 'resumen', etc.)
-    target_service_name: str = Field(...) 
-    
-    # Datos que el siguiente servicio necesita y el Transcriptor solo pasa (Pass-through)
-    payload_template: Dict[str, Any] = Field(default_factory=dict)

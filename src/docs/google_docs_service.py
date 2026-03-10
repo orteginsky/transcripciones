@@ -160,5 +160,3 @@ def append_formatted_transcript(doc_id: str, title: str, transcript_text: str) -
         logger.error(f"❌ Error en Google Docs API: {e}")
         raise RuntimeError(f"Docs API error: {e}") from e
 
-def append_text_to_google_doc(doc_id: str, content: str) -> Dict[str, Any]:
-    return append_formatted_transcript(doc_id, "ANEXO", content)

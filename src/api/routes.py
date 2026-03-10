@@ -9,7 +9,6 @@ Main endpoint: POST /api/transcribe
 """
 from __future__ import annotations
 from fastapi import APIRouter, HTTPException, status
-from datetime import datetime
 
 from src.api.schemas import TranscriptionRequest, TranscriptionResponse, ErrorResponse
 from src.orchestration.runner import run_transcription_pipeline, PipelineError

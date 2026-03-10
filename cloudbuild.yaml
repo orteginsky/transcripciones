@@ -21,7 +21,7 @@ steps:
       - -t
       - $_IMAGE:latest
       - -t
-      - $_IMAGE:$SHORT_SHA
+      - $_IMAGE:$BUILD_ID
       - .
 
   # ── 2. Push ───────────────────────────────────────────────────────────────
@@ -41,15 +41,16 @@ steps:
       - run
       - deploy
       - $_SERVICE
-      - --image=$_IMAGE:$SHORT_SHA
+      - --image=$_IMAGE:$BUILD_ID
       - --region=$_REGION
       - --platform=managed
       - --service-account=sa-transcriptor@$_PROJECT.iam.gserviceaccount.com
+      - --set-secrets=OAUTH2_TOKEN_JSON=OAUTH2_TOKEN_JSON:latest
     waitFor: [push]
 
 images:
   - $_IMAGE:latest
-  - $_IMAGE:$SHORT_SHA
+  - $_IMAGE:$BUILD_ID
 
 options:
   logging: CLOUD_LOGGING_ONLY

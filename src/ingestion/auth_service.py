@@ -27,6 +27,7 @@ Regeneración local (ejecutar UNA VEZ en tu máquina):
   ---------------------------------------------------
   Luego sube token.json a Cloud Run (ej. via Secret Manager).
 """
+import json
 import threading
 from pathlib import Path
 from typing import Optional
@@ -79,33 +80,47 @@ def get_oauth2_credentials() -> Credentials:
         if _creds_cache is not None and _creds_cache.valid:
             return _creds_cache
 
-        token_path = Path(settings.oauth2_token_file)
-
-        if not token_path.exists():
-            raise FileNotFoundError(
-                f"No se encontró '{token_path}'. "
-                "Genera el token localmente con InstalledAppFlow.run_local_server() "
-                "y despliega token.json en Cloud Run (p.ej. via Secret Manager). "
-                "Consulta el docstring de este módulo para el script completo."
-            )
-
-        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        # --- Origen de las credenciales ---
+        # Prioridad 1: variable de entorno OAUTH2_TOKEN_JSON (Secret Manager en Cloud Run)
+        # Prioridad 2: archivo oauth2_token_file (desarrollo local)
+        if settings.oauth2_token_json:
+            try:
+                token_info = json.loads(settings.oauth2_token_json)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(
+                    "OAUTH2_TOKEN_JSON contiene JSON inválido. "
+                    "Verifica que el secreto se copió correctamente."
+                ) from e
+            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+            source = "variable de entorno OAUTH2_TOKEN_JSON"
+        else:
+            token_path = Path(settings.oauth2_token_file)
+            if not token_path.exists():
+                raise FileNotFoundError(
+                    f"No se encontró '{token_path}' y OAUTH2_TOKEN_JSON no está definida. "
+                    "Genera el token localmente con InstalledAppFlow.run_local_server() "
+                    "y despliega token.json en Cloud Run (p.ej. via Secret Manager). "
+                    "Consulta el docstring de este módulo para el script completo."
+                )
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            source = f"archivo '{token_path}'"
 
         if not creds.valid:
             if creds.expired and creds.refresh_token:
                 try:
                     creds.refresh(Request())
-                    logger.info("🔄 Token OAuth2 refrescado exitosamente.")
-                    # Persiste el nuevo token para esta instancia de contenedor.
-                    try:
-                        token_path.write_text(creds.to_json(), encoding="utf-8")
-                        logger.info("💾 token.json actualizado en disco.")
-                    except OSError as write_err:
-                        logger.warning(
-                            "⚠️  No se pudo persistir token.json (%s). "
-                            "Se usará en memoria para esta ejecución.",
-                            write_err,
-                        )
+                    logger.info("Token OAuth2 refrescado exitosamente.")
+                    # Intentar persistir solo si se usa archivo local.
+                    if not settings.oauth2_token_json:
+                        try:
+                            token_path.write_text(creds.to_json(), encoding="utf-8")  # type: ignore[possibly-undefined]
+                            logger.info("token.json actualizado en disco.")
+                        except OSError as write_err:
+                            logger.warning(
+                                "No se pudo persistir token.json (%s). "
+                                "Se usará en memoria para esta ejecución.",
+                                write_err,
+                            )
                 except RefreshError as e:
                     raise RuntimeError(
                         "El token OAuth2 expiró y no pudo refrescarse automáticamente. "
@@ -117,7 +132,7 @@ def get_oauth2_credentials() -> Credentials:
                     "Regenera token.json localmente y vuelve a desplegarlo."
                 )
 
-        logger.info("🔐 Credenciales OAuth2 válidas cargadas desde '%s'.", token_path)
+        logger.info("Credenciales OAuth2 válidas cargadas desde %s.", source)
         _creds_cache = creds
         return creds
 

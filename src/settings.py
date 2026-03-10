@@ -25,10 +25,28 @@ class Settings(BaseSettings):
 
     # --- GCP / Vertex ---
     gcp_project_id: str | None = Field(default=None, env="GCP_PROJECT_ID")
-    gcp_region: str | None = Field(default=None, env="GCP_REGION")
+    gcp_region: str = Field(default="global", env="GCP_REGION")
     google_application_credentials: str | None = Field(
         default=None,
         env="GOOGLE_APPLICATION_CREDENTIALS",
+    )
+
+    # --- OAuth2 (credentials.json + token.json) ---
+    # Rutas configurables; en Cloud Run inyectar vía Secret Manager o variable de entorno.
+    oauth2_credentials_file: Path = Field(
+        default=Path("credentials.json"),
+        env="OAUTH2_CREDENTIALS_FILE",
+    )
+    oauth2_token_file: Path = Field(
+        default=Path("token.json"),
+        env="OAUTH2_TOKEN_FILE",
+    )
+    # Contenido JSON del token directamente como string.
+    # Si está definido, tiene prioridad sobre oauth2_token_file.
+    # En Cloud Run: montar el secreto como variable de entorno OAUTH2_TOKEN_JSON.
+    oauth2_token_json: str | None = Field(
+        default=None,
+        env="OAUTH2_TOKEN_JSON",
     )
 
     # --- Speech-to-Text v2 ---

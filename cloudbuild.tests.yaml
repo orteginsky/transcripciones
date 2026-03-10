@@ -1,0 +1,73 @@
+# cloudbuild.tests.yaml — Build, push y deploy a Cloud Run (proyecto de TESTS)
+# Uso manual : gcloud builds submit --config cloudbuild.tests.yaml --project=tests-477820 .
+# Uso trigger : configurar trigger en Cloud Build del proyecto tests-477820.
+#
+# Imagen destino : us-central1-docker.pkg.dev/tests-477820/ai/transcripciones
+# Servicio CR    : transcripciones-tests  (us-central1)
+# SA de deploy   : sa-transcriptor@tests-477820.iam.gserviceaccount.com
+
+substitutions:
+  _REGION:  us-central1
+  _PROJECT: tests-477820
+  _SERVICE: transcripciones-tests
+  _IMAGE:   us-central1-docker.pkg.dev/tests-477820/ai/transcripciones
+
+steps:
+  # ── 1. Build ──────────────────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - -t
+      - $_IMAGE:latest
+      - -t
+      - $_IMAGE:$BUILD_ID
+      - .
+
+  # ── 2. Push ───────────────────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push
+    args:
+      - push
+      - --all-tags
+      - $_IMAGE
+    waitFor: [build]
+
+  # ── 3. Deploy ─────────────────────────────────────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - $_SERVICE
+      - --image=$_IMAGE:$BUILD_ID
+      - --region=$_REGION
+      - --platform=managed
+      - --service-account=sa-transcriptor@$_PROJECT.iam.gserviceaccount.com
+      - --set-secrets=OAUTH2_TOKEN_JSON=OAUTH2_TOKEN_JSON:latest
+      - --set-env-vars=GCP_PROJECT_ID=$_PROJECT
+      - --set-env-vars=GCP_REGION=us-central1
+      - --set-env-vars=USE_GCS=true
+      - --set-env-vars=GCS_BUCKET=tmf-audio-tests
+      - --set-env-vars=GCS_BUCKET_OUTPUT=tmf-audio-tests
+      - --set-env-vars=TRANSCRIBER_ENGINE=stt_v1_stereo
+      - --set-env-vars=GEMINI_VERTEX=gemini-2.0-flash-001
+      - --set-env-vars=STT_LANGUAGE_CODE=es-MX
+      - --set-env-vars=STT_ENABLE_DIARIZATION=true
+      - --set-env-vars=STT_MIN_SPEAKERS=2
+      - --set-env-vars=STT_MAX_SPEAKERS=2
+      - --set-env-vars=SPEECH_LOCATION=us-central1
+      - --set-env-vars=SPEECH_RECOGNIZER=projects/tests-477820/locations/us-central1/recognizers/tmf-recognizer
+      - --allow-unauthenticated
+      - --memory=2Gi
+      - --timeout=900
+      - --concurrency=10
+    waitFor: [push]
+
+images:
+  - $_IMAGE:latest
+  - $_IMAGE:$BUILD_ID
+
+options:
+  logging: CLOUD_LOGGING_ONLY
