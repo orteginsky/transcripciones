@@ -1,11 +1,114 @@
 # src/storage/audio_normalizer_service.py
 import os
+import subprocess
 import tempfile
+from pathlib import Path
+from typing import List
 from google.cloud import storage
 from pydub import AudioSegment
 from src.logging_conf import get_logger
 
 logger = get_logger(__name__)
+
+
+def split_audio_with_overlap(
+    file_path: str,
+    segment_min: int = 15,
+    overlap_sec: int = 90,
+) -> List[str]:
+    """
+    Divide un archivo de audio local en fragmentos de `segment_min` minutos con
+    `overlap_sec` segundos de solapamiento entre fragmentos consecutivos.
+
+    Usa ffmpeg con `-c copy` (stream-copy) para NO recodificar el audio,
+    lo que hace el corte casi instantáneo y sin pérdida de calidad.
+
+    Args:
+        file_path: Ruta local al archivo de audio.
+        segment_min: Duración de cada fragmento en minutos (default 15).
+        overlap_sec: Solapamiento en segundos entre fragmentos (default 90).
+
+    Returns:
+        Lista de rutas locales a los fragmentos generados, en orden.
+
+    Raises:
+        FileNotFoundError: Si `ffmpeg` no está instalado o `file_path` no existe.
+        subprocess.CalledProcessError: Si ffmpeg falla al procesar el archivo.
+    """
+    file_path = str(file_path)
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Archivo no encontrado: {file_path}")
+
+    # Obtener duración total con ffprobe
+    probe_cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]
+    try:
+        result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+        total_duration = float(result.stdout.strip())
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ ffprobe falló: {e.stderr}")
+        raise
+
+    logger.info(f"🎵 Duración total del audio: {total_duration:.1f}s")
+
+    segment_sec = segment_min * 60
+    step_sec = segment_sec - overlap_sec  # Avance real entre fragmentos
+
+    if step_sec <= 0:
+        raise ValueError(
+            f"El solapamiento ({overlap_sec}s) no puede ser >= duración del segmento ({segment_sec}s)"
+        )
+
+    ext = Path(file_path).suffix or ".mp3"
+    out_dir = os.path.dirname(file_path)
+    stem = Path(file_path).stem
+
+    fragments: List[str] = []
+    start = 0.0
+    part_index = 1
+
+    while start < total_duration:
+        end = min(start + segment_sec, total_duration)
+        duration = end - start
+
+        out_path = os.path.join(out_dir, f"{stem}_P{part_index:02d}{ext}")
+
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",           # Sobreescribir sin preguntar
+            "-ss", str(start),         # Inicio del fragmento (seek de entrada)
+            "-t", str(duration),       # Duración del fragmento
+            "-i", file_path,           # Archivo fuente
+            "-c", "copy",             # Stream-copy: SIN recodificar
+            out_path
+        ]
+
+        logger.info(
+            f"✂️  Fragmento P{part_index:02d}: "
+            f"{start:.1f}s → {end:.1f}s (duración: {duration:.1f}s) → {out_path}"
+        )
+
+        try:
+            subprocess.run(
+                ffmpeg_cmd, capture_output=True, text=True, check=True
+            )
+        except subprocess.CalledProcessError as e:
+            logger.error(f"❌ ffmpeg falló en fragmento P{part_index:02d}: {e.stderr}")
+            raise
+
+        fragments.append(out_path)
+        part_index += 1
+
+        # Siguiente inicio: avanza `step_sec` (con solapamiento incluido)
+        start += step_sec
+        if start >= total_duration:
+            break
+
+    logger.info(f"✅ Audio dividido en {len(fragments)} fragmento(s).")
+    return fragments
 
 def normalize_and_upload_gcs(
     gcs_src_uri: str,

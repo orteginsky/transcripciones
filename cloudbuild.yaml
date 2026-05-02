@@ -7,10 +7,13 @@
 # SA de deploy   : sa-transcriptor@ortega-473114.iam.gserviceaccount.com
 
 substitutions:
-  _REGION:  us-central1
-  _PROJECT: ortega-473114
-  _SERVICE: transcripciones
-  _IMAGE:   us-central1-docker.pkg.dev/ortega-473114/ai/transcripciones
+  _REGION:        us-central1
+  _PROJECT:       ortega-473114
+  _SERVICE:       transcripciones
+  _IMAGE:         us-central1-docker.pkg.dev/ortega-473114/ai/transcripciones
+  _GEMINI_VERTEX: gemini-2.5-flash
+  _GCP_REGION:    global
+  _GCS_BUCKET:    my-bucket-out
 
 steps:
   # ── 1. Build ──────────────────────────────────────────────────────────────
@@ -46,6 +49,7 @@ steps:
       - --platform=managed
       - --service-account=sa-transcriptor@$_PROJECT.iam.gserviceaccount.com
       - --set-secrets=OAUTH2_TOKEN_JSON=OAUTH2_TOKEN_JSON:latest
+      - --set-env-vars=GCP_PROJECT_ID=$_PROJECT,GCP_REGION=$_GCP_REGION,GEMINI_VERTEX=$_GEMINI_VERTEX,GCS_BUCKET=$_GCS_BUCKET
     waitFor: [push]
 
 images:

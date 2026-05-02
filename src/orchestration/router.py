@@ -8,14 +8,17 @@ This module determines which transcription engine to use based on:
 3. Source (8x8 calls vs other sources)
 """
 from __future__ import annotations
-from typing import Literal
-from dataclasses import dataclass
+from typing import Literal, Optional
+from dataclasses import dataclass, field
 import os
 
 from src.logging_conf import get_logger
 from src.api.schemas import TranscriptionRequest
 
 logger = get_logger(__name__)
+
+# Umbral a partir del cual se activa la segmentación por fragmentos (20 min)
+SEGMENTATION_THRESHOLD_SEC: int = 20 * 60
 
 TranscriptionEngine = Literal["stt_v1", "gemini_flash"]
 
@@ -26,37 +29,41 @@ class RoutingDecision:
     requires_normalization: bool
     target_channels: int
     reason: str
+    requires_segmentation: bool = field(default=False)
+    duration_seconds: Optional[float] = field(default=None)
 
 def decide_transcription_strategy(
     request: TranscriptionRequest,
-    gcs_raw_uri: str
+    gcs_raw_uri: str,
+    duration_seconds: Optional[float] = None,
 ) -> RoutingDecision:
     """
-    Brain/Router: Logica optimizada para velocidad.
+    Brain/Router: Siempre usa Gemini Flash.
 
-    Reglas de Eficiencia:
-    1. 8x8 Call -> STT V1 (Stereo forzado, Normalización Requerida).
-    2. Todo lo demás -> Gemini Flash (Bypass de normalización por defecto).
-    
+    Regla única: Gemini Flash para TODO (8x8 o no).
+    Si la duración supera 20 minutos, activa `requires_segmentation=True`
+    para que el runner use el pipeline de fragmentos entrelazados.
     """
+    requires_segmentation = (
+        duration_seconds is not None
+        and duration_seconds > SEGMENTATION_THRESHOLD_SEC
+    )
 
-    # Regla 1: Llamadas 8x8 (Infraestructura Legacy/Stereo)
+    reason = "Estrategia forzada: Gemini Flash (motor único)"
     if request.is_8x8_call:
-        return RoutingDecision(
-            engine="stt_v1",
-            requires_normalization=True, # STT V1 EXIGE FLAC Stereo
-            target_channels=2,
-            reason="8x8 call detected → STT V1 (Stereo Isolation)"
-        )
+        reason += " [override de llamada 8x8]"
+    if requires_segmentation:
+        reason += f" | Segmentación activada (duración={duration_seconds:.0f}s > {SEGMENTATION_THRESHOLD_SEC}s)"
 
-    # Regla 2: Fast-Track para todo lo demás (Gemini)
-    # Asumimos Gemini Flash para videos, audios de drive, mp3, etc.
-    # Es más barato, más rápido y soporta formatos nativos.
+    logger.info(f"🚦 Router: {reason}")
+
     return RoutingDecision(
         engine="gemini_flash",
-        requires_normalization=False, # Optimización: Intentamos enviar el archivo crudo
+        requires_normalization=False,
         target_channels=1,
-        reason="Default Strategy → Gemini Flash (Native format bypass)"
+        reason=reason,
+        requires_segmentation=requires_segmentation,
+        duration_seconds=duration_seconds,
     )
 
 def should_normalize_audio(decision: RoutingDecision, gcs_uri: str) -> bool:

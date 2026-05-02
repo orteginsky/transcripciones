@@ -38,3 +38,4 @@ credentials.json
 scripts
 test.py
 transcripciones.jsonl
+*.txt

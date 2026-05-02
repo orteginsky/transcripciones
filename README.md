@@ -1,17 +1,21 @@
 # TMF Audio/Video Transcription API (GCP / Cloud Run ready)
 
-Servicio FastAPI que transcribe audios y videos de Google Drive con **enrutamiento inteligente** de motores de transcripción.
+Servicio FastAPI que transcribe audios y videos de Google Drive usando **Gemini Flash como motor único**, con segmentación automática para archivos largos (>20 min).
 
 ## Características principales
 
 1. **Descarga** audio/video desde Google Drive
-2. **Enrutamiento inteligente** que selecciona automáticamente el mejor motor de transcripción:
-   - **Gemini 2.5 Flash**: Rápido y económico para audios cortos/mono y videos
-   - **STT V1 Stereo**: Óptimo para llamadas telefónicas (8x8) y audios largos en estéreo
-3. **Normalización condicional**: Solo se normaliza cuando es necesario (STT requiere FLAC, Gemini consume MP3 directo)
-4. **Escribe** la transcripción en **Google Docs** con formato (título, fecha, estilos)
-5. **Actualiza Google Sheets** con resultados (estado, enlace, motor usado, duración)
-6. Expone **/metrics** (Prometheus), **/health** y **/docs**
+2. **Detección automática de duración** con `ffprobe` para decidir la estrategia
+3. **Gemini Flash como motor único** para toda transcripción (audio, video, llamadas)
+4. **Segmentación automática** para audios >20 min:
+   - División en fragmentos de 15 min con 90 s de solapamiento (`ffmpeg -c copy`, sin pérdida)
+   - Transcripción **paralela** de fragmentos (hasta 4 workers simultáneos)
+   - **Consolidación inteligente** con Gemini Flash: elimina repeticiones y unifica hablantes
+5. **Normalización condicional**: solo para formatos exóticos; Gemini consume MP3/MP4 directo
+6. **Escribe** la transcripción en **Google Docs** con formato (título, fecha, estilos)
+7. **Actualiza Google Sheets** con resultados (estado, enlace, motor usado, duración)
+8. **Respaldo automático** de la transcripción como `.txt` en GCS
+9. Expone **/metrics** (Prometheus), **/health** y **/docs**
 
 > **Cuenta de servicio**: `sa-transcriptor@ortega-473114.iam.gserviceaccount.com`
 
@@ -33,17 +37,21 @@ src/
     auth_service.py            # Credenciales Service Account (Drive/Docs/Sheets)
   orchestration/
     runner.py                  # Pipeline principal: run_transcription_pipeline
-    router.py                  # Enrutamiento inteligente de motores
+                               #   + consolidate_fragments (ensamblador con Gemini)
+                               #   + _run_segmented_pipeline (fragmentos en paralelo)
+    router.py                  # Router: Gemini Flash siempre; activa segmentación si >20 min
   sheets/
     sheets_service.py          # Actualiza Google Sheets con resultados
   storage/
-    audio_normalizer_service.py# Normalización condicional a FLAC/WAV
+    audio_normalizer_service.py# Normalización condicional + split_audio_with_overlap
     gcs_uploader.py            # Sube archivos a GCS
     gcs_cleaner.py             # Limpieza de archivos temporales en GCS
     upload_service.py          # Servicio de carga (Drive → GCS)
   transcription/
-    transcribers.py            # Motores: Gemini Flash, STT V1 Stereo/Mono
-    vertex_service.py          # Cliente Vertex AI / Gemini
+    transcribers.py            # Motor STT V1 Stereo (llamadas 8x8, override manual)
+    vertex_service.py          # Cliente Vertex AI / Gemini:
+                               #   transcribe_with_gemini (audio completo)
+                               #   transcribe_fragment_with_gemini (un fragmento → JSON)
   tools/
     manage_recognizer.py       # CLI para gestionar recognizers de STT
   logging_conf.py
@@ -51,20 +59,22 @@ src/
   settings.py                  # Configuración centralizada
 ```
 
+---
+
 ## 🧠 Arquitectura
 
-### 1) Vista general (flujo funcional)
+### 1) Vista general — flujo completo (7 pasos)
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as Cliente (Thunder/Apps Script)
     participant API as FastAPI (/api/transcribe)
-    participant RT as Router (orchestration/router.py)
     participant DR as Google Drive API
     participant GCS as Cloud Storage
+    participant RT as Router (orchestration/router.py)
     participant AU as audio_normalizer_service
-    participant TR as Transcribers (STT/Gemini)
+    participant GEM as Gemini Flash (Vertex AI)
     participant GD as Google Docs API
     participant SH as Google Sheets API
 
@@ -72,79 +82,126 @@ sequenceDiagram
 
     Note over API,DR: 1) Descarga desde Drive
     API->>DR: download_from_drive(drive_file_id)
-    DR-->>API: archivo local + metadata (duración, canales, codec)
+    DR-->>API: archivo en GCS (raw) + URI
 
-    Note over API,RT: 2) Enrutamiento inteligente
-    API->>RT: route_request(metadata, strategy, is_8x8_call)
-    alt strategy="auto"
-        RT->>RT: Aplicar lógica de enrutamiento
-        Note over RT: 8x8 → STT V1<br/>Video → Gemini<br/>Largo+Stereo → STT V1<br/>Corto/Mono → Gemini
-    else strategy manual
-        RT->>RT: Usar motor especificado
-    end
-    RT-->>API: {backend, normalize_needed}
+    Note over API: 2) Detección de duración (ffprobe)
+    API->>API: _get_local_audio_duration(local_tmp)
 
-    Note over API,AU: 3) Normalización condicional
-    alt normalize_needed=true
-        API->>AU: normalize_to_flac_stereo()
-        AU-->>API: archivo normalizado
-    else normalize_needed=false
-        Note over API: Bypass de normalización (Gemini usa MP3 directo)
+    Note over API,RT: 3) Enrutamiento inteligente
+    API->>RT: decide_transcription_strategy(request, gcs_uri, duration)
+    RT-->>API: {engine=gemini_flash, requires_segmentation}
+
+    Note over API,AU: 4) Normalización condicional
+    alt formato exótico (.amr, .wma, …)
+        API->>AU: normalize_and_upload_gcs()
+        AU-->>API: archivo normalizado en GCS
+    else formato nativo (mp3, mp4, wav, flac…)
+        Note over API: Bypass — se usa raw directo
     end
 
-    Note over API,GCS: 4) Subida a GCS
-    API->>GCS: upload_to_gcs(archivo)
-    GCS-->>API: gs_uri
-
-    Note over API,TR: 5) Transcripción
-    alt Backend: Gemini
-        API->>TR: gemini_flash_transcribe(gs_uri)
-        TR-->>API: transcripción
-    else Backend: STT V1
-        API->>TR: stt_v1_stereo_transcribe(gs_uri)
-        TR-->>API: transcripción con diarización
+    Note over API,GEM: 5) Transcripción
+    alt duración ≤ 20 min (directo)
+        API->>GEM: transcribe_with_gemini(gcs_uri)
+        GEM-->>API: texto transcrito
+    else duración > 20 min (segmentación)
+        API->>AU: split_audio_with_overlap(15 min / 90 s solape)
+        AU-->>API: lista de fragmentos locales
+        loop Por cada fragmento (paralelo, max 4 workers)
+            API->>GCS: upload fragment
+            API->>GEM: transcribe_fragment_with_gemini(fragment_uri)
+            GEM-->>API: JSON {part, data:[{start,spk,text}]}
+        end
+        API->>GEM: consolidate_fragments(jsonl) — elimina solapes y unifica hablantes
+        GEM-->>API: texto consolidado final
     end
 
     Note over API,GD: 6) Escritura a Google Docs
-    API->>GD: write_to_doc(doc_id, transcripción)
+    API->>GD: append_formatted_transcript(doc_id, título, texto)
     GD-->>API: OK
 
-    Note over API,SH: 7) Actualización de Sheet (opcional)
+    Note over API,SH: 7) Callbacks (Sheet + Chaining)
     alt sheet_callback configurado
-        API->>SH: update_sheet(spreadsheet_id, row, status, doc_link, engine, duration)
-        SH-->>API: OK
+        API->>SH: update_transcription_result(spreadsheet_id, row, …)
+    end
+    alt next_step_task configurado
+        API->>API: POST enqueuer_url {service, payload}
     end
 
-    API-->>U: {status, doc_id, backend_used, duration_seconds}
+    API-->>U: {status, doc_id, backend_used, segmented, duration_seconds}
 ```
 
-### 2) Lógica de enrutamiento
+---
 
-El sistema selecciona automáticamente el mejor motor según las características del archivo:
+### 2) Lógica de enrutamiento (v3.0)
 
-| Condición | Motor seleccionado | Razón |
-|-----------|-------------------|-------|
-| `is_8x8_call=true` | **STT V1 Stereo** | Llamadas telefónicas 8x8 requieren separación de canales |
-| Extensión `.mp4` | **Gemini Flash** | Videos se procesan directamente sin extracción de audio |
-| Duración > 25 min **Y** 2 canales | **STT V1 Stereo** | Audios largos en estéreo necesitan diarización robusta |
-| Cualquier otro caso | **Gemini Flash** | Más rápido y económico para audios cortos/mono |
+El router usa **Gemini Flash para TODO**. La única decisión real es si activar la segmentación:
 
-**Normalización condicional:**
-- **STT V1**: Siempre normaliza a FLAC estéreo (16kHz)
-- **Gemini Flash**: Consume MP3 directamente (bypass de normalización = +60% velocidad)
+| Condición | Motor | Segmentación |
+|-----------|-------|-------------|
+| Duración detectable ≤ 20 min | **Gemini Flash** | NO — transcripción directa |
+| Duración > 20 min | **Gemini Flash** | SÍ — fragmentos de 15 min con 90 s de solape |
+| Duración desconocida | **Gemini Flash** | NO — transcripción directa (fallback seguro) |
+| `strategy` ≠ `"auto"` (override manual) | **Gemini Flash** | NO (siempre directo en override) |
+
+> **Nota**: `is_8x8_call` ya no cambia el motor. STT V1 Stereo sigue disponible únicamente como motor legacy para overrides específicos en el código.
+
+**Normalización condicional (sin cambios):**
+- Formatos nativos de Gemini (`.mp3`, `.mp4`, `.wav`, `.flac`, `.m4a`, `.aac`, `.ogg`, `.webm`, `.mov`, `.mpeg`) → **bypass total**
+- Formatos exóticos (`.amr`, `.wma`, etc.) → normaliza a MP3
+
+---
+
+### 3) Pipeline de segmentación (audios >20 min)
+
+```
+Audio raw (GCS)
+       │
+       ▼
+_download_gcs_to_tmp()          # Descarga a /tmp local
+       │
+       ▼
+split_audio_with_overlap()      # ffmpeg -c copy (sin recodificar)
+  ├── fragmento_P01.mp3  [00:00 → 15:00]
+  ├── fragmento_P02.mp3  [13:30 → 28:30]  ← 90 s de solape con P01
+  ├── fragmento_P03.mp3  [27:00 → 42:00]  ← 90 s de solape con P02
+  └── …
+       │
+       ▼  (paralelo, max 4 workers)
+transcribe_fragment_with_gemini()  # Cada fragmento → JSON forense
+  → {"part": "P01", "data": [{"start": 0, "spk": "SPEAKER_1", "text": "..."}]}
+       │
+       ▼
+consolidate_fragments()          # Gemini Flash como ensamblador:
+  1. Elimina repeticiones exactas en los solapamientos de 90 s
+  2. Unifica hablantes entre fragmentos (SPEAKER_1_P01 ≡ SPEAKER_1_P02)
+  3. Devuelve texto plano con marcas [MM:SS] listo para Google Docs
+       │
+       ▼
+Texto final consolidado
+```
+
+**Constantes configurables** (`runner.py`):
+
+| Constante | Valor | Descripción |
+|-----------|-------|-------------|
+| `SEGMENT_MIN` | `15` | Duración de cada fragmento (minutos) |
+| `OVERLAP_SEC` | `90` | Solapamiento entre fragmentos (segundos) |
+| `MAX_PARALLEL_FRAGMENTS` | `4` | Workers simultáneos para Gemini |
+| `SEGMENTATION_THRESHOLD_SEC` | `1200` (20 min) | Umbral para activar segmentación |
 
 ---
 
 ## ⚙️ Prerrequisitos
 
 * **Python 3.11+**
+* **ffmpeg** y **ffprobe** instalados en el sistema (requeridos para segmentación y detección de duración)
 * **Google Cloud Project** con APIs habilitadas:
   * Google Drive API
   * Google Docs API
   * Google Sheets API
   * Cloud Storage
   * Vertex AI API
-  * Speech-to-Text API
+  * Speech-to-Text API *(solo para uso legacy de STT V1)*
 * **Service Account** con permisos:
   * Acceso **editor** a los Google Docs de destino
   * Acceso **editor** a las Google Sheets (para callbacks)
@@ -171,12 +228,12 @@ GCS_BUCKET_OUTPUT=my-bucket-out
 GCS_UPLOAD_CHUNK_MB=64
 
 # --- Motor de transcripción por defecto ---
-TRANSCRIBER_ENGINE=stt_v1_stereo  # stt_v1_stereo | gemini_flash
+TRANSCRIBER_ENGINE=gemini_flash   # gemini_flash es ahora el motor único
 
 # --- Gemini (modelo configurable) ---
-GEMINI_VERTEX=gemini-3-flash-preview  # Modelo a usar en Vertex AI
+GEMINI_VERTEX=gemini-2.5-flash-preview-04-17   # Modelo a usar en Vertex AI
 
-# --- Speech-to-Text ---
+# --- Speech-to-Text (legacy) ---
 STT_LANGUAGE_CODE=es-MX
 STT_ENABLE_DIARIZATION=true
 STT_MIN_SPEAKERS=2
@@ -217,11 +274,17 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 # 2. Instalar dependencias
 pip install -r requirements.txt
 
-# 3. Configurar variables de entorno
+# 3. Instalar ffmpeg (requerido para segmentación)
+# Ubuntu/Debian:
+sudo apt-get install ffmpeg
+# macOS:
+brew install ffmpeg
+
+# 4. Configurar variables de entorno
 cp .env.example .env
 # Edita .env con tus credenciales
 
-# 4. Ejecutar API
+# 5. Ejecutar API
 uvicorn src.main:app --reload --port 8080
 ```
 
@@ -237,7 +300,7 @@ uvicorn src.main:app --reload --port 8080
 
 ### Endpoint único: `POST /api/transcribe`
 
-Acepta audios y videos de Google Drive, con enrutamiento inteligente automático.
+Acepta audios y videos de Google Drive. Para audios >20 min activa automáticamente el pipeline de segmentación.
 
 **Request body**:
 
@@ -269,9 +332,11 @@ Acepta audios y videos de Google Drive, con enrutamiento inteligente automático
 - `title`: Título para el documento
 - `drive_file_id`: ID del archivo en Google Drive (o URL completa; se extrae automáticamente)
 - `doc_id`: ID del Google Doc de destino
-- `strategy`: Estrategia de routing (`"auto"`, `"gemini_flash"`, `"gemini_pro"`, `"stt_v1_stereo"`)
+- `strategy`: Estrategia de routing (`"auto"` | `"gemini_flash"`)
+  - En `"auto"`: el router decide si transcribir directo o en fragmentos según duración
+  - Cualquier valor distinto de `"auto"` fuerza transcripción directa con Gemini Flash
 - `language_code`: Idioma del audio (opcional, default: `"es-MX"`)
-- `is_8x8_call`: Forzar STT V1 para llamadas 8x8 (opcional, default: `false`)
+- `is_8x8_call`: Indicador de llamada 8x8 — ya no cambia el motor, solo se registra en logs
 - `bucket_name`: Bucket GCS a usar (opcional, usa el configurado en settings por defecto)
 - `sheet_callback`: Configuración para actualizar Google Sheets (opcional)
 - `next_step_task`: Configuración para encolar la siguiente tarea vía Enqueuer (opcional)
@@ -282,55 +347,43 @@ Acepta audios y videos de Google Drive, con enrutamiento inteligente automático
 {
   "case_id": "CASE-2024-001",
   "doc_id": "1doc987xyz654321",
-  "backend_used": "Gemini 2.5 Flash",
+  "doc_url": "https://docs.google.com/document/d/1doc987xyz654321/edit",
+  "backend_used": "gemini_flash",
+  "backend_display_name": "gemini-2.5-flash-preview-04-17",
+  "segmented": false,
   "duration_seconds": 42.5,
   "status": "success",
-  "timestamp": "2025-12-18T10:15:30.123Z",
-  "output_files": {
-    "google_doc": "https://docs.google.com/document/d/1doc987xyz654321/edit"
-  }
+  "timestamp": "2026-04-01T15:30:00.123Z"
 }
 ```
+
+> El campo `segmented: true` indica que se usó el pipeline de fragmentos entrelazados.
 
 ---
 
 ## 🎚️ Estrategias de transcripción
 
-### 1. Modo automático (`strategy: "auto"`)
+### 1. Modo automático (`strategy: "auto"`) — Recomendado
 
-El router selecciona el mejor motor basándose en:
-- Tipo de archivo (audio vs. video)
-- Duración del contenido
-- Número de canales (mono vs. stereo)
-- Flag `is_8x8_call`
+El router selecciona el flujo basándose en la **duración del audio**:
 
-**Ejemplo**: Audio corto mono → Gemini Flash (rápido + económico)
+| Duración | Flujo | Descripción |
+|----------|-------|-------------|
+| ≤ 20 min | **Transcripción directa** | Gemini recibe el archivo completo |
+| > 20 min | **Pipeline de fragmentos** | 15 min / 90 s solape → paralelo → consolidación |
+| Desconocida | **Transcripción directa** | Fallback seguro si ffprobe falla |
+
+**Ejemplo**: Audio de 45 min → 4 fragmentos → transcripción en paralelo → texto unificado.
 
 ### 2. Override manual
 
-Puedes forzar un motor específico:
+Fuerza transcripción directa con Gemini Flash (sin importar la duración):
 
 ```json
-{ "strategy": "gemini_flash" }    // Gemini Flash (rápido, económico)
+{ "strategy": "gemini_flash" }
 ```
 
-```json
-{ "strategy": "gemini_pro" }      // Gemini Pro (mayor capacidad)
-```
-
-```json
-{ "strategy": "stt_v1_stereo" }   // STT V1 con diarización estéreo
-```
-
-### 3. Llamadas 8x8
-
-Para llamadas telefónicas de 8x8 (siempre en estéreo):
-
-```json
-{
-  "is_8x8_call": true  // Fuerza STT V1 Stereo automáticamente
-}
-```
+> **Nota**: Desde v3.0, todas las estrategias manuales enrutan a Gemini Flash y desactivan la segmentación automática. Si necesitas forzar segmentación en un audio corto, no existe esa opción por diseño.
 
 ---
 
@@ -339,8 +392,6 @@ Para llamadas telefónicas de 8x8 (siempre en estéreo):
 Una vez terminada la transcripción, puedes encolar la siguiente tarea en un servicio Enqueuer genérico:
 
 ### Cola de tareas (`next_step_task`)
-
-Encola la siguiente tarea en un servicio Enqueuer genérico:
 
 ```json
 {
@@ -352,6 +403,13 @@ Encola la siguiente tarea en un servicio Enqueuer genérico:
 }
 ```
 
+El pipeline añade automáticamente al payload:
+- `transcription_doc_id`
+- `transcription_doc_url`
+- `case_id`
+- `source_file_id`
+- `status: "transcription_completed"`
+
 ---
 
 ## 📝 Formato en Google Docs
@@ -359,9 +417,9 @@ Encola la siguiente tarea en un servicio Enqueuer genérico:
 La transcripción se escribe en el Google Doc especificado con el siguiente formato:
 
 1. **Encabezado**: Título + fecha/hora de transcripción
-2. **Cuerpo**: Transcripción formateada según el motor:
-   - **STT V1**: Marcas de tiempo + diarización (Agente/Cliente)
-   - **Gemini**: Texto corrido con párrafos
+2. **Cuerpo**: Transcripción con marcas de hablante y tiempo:
+   - **Pipeline directo**: Texto corrido con párrafos por hablante
+   - **Pipeline segmentado**: Marcas `[MM:SS] Hablante X: texto...` alineadas cronológicamente
 
 **Permisos necesarios**: El documento debe estar compartido con la cuenta de servicio en modo **Editor**, o ubicado en un Shared Drive accesible.
 
@@ -369,14 +427,14 @@ La transcripción se escribe en el Google Doc especificado con el siguiente form
 
 ## 🧪 Ejemplos rápidos
 
-### 1. Transcripción automática (curl)
+### 1. Audio corto — transcripción directa (curl)
 
 ```bash
 curl -X POST "http://localhost:8080/api/transcribe" \
   -H "Content-Type: application/json" \
   -d '{
     "case_id": "CASE-001",
-    "title": "Llamada con cliente",
+    "title": "Reunión breve",
     "drive_file_id": "1abc123xyz",
     "doc_id": "1doc456xyz",
     "strategy": "auto",
@@ -384,9 +442,27 @@ curl -X POST "http://localhost:8080/api/transcribe" \
   }'
 ```
 
-### 2. Llamada 8x8 (curl)
+### 2. Audio largo — segmentación automática (curl)
 
 ```bash
+# Si el audio dura >20 min, el router activa la segmentación automáticamente.
+# No se requiere ningún parámetro extra.
+curl -X POST "http://localhost:8080/api/transcribe" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "case_id": "MEETING-2026-04",
+    "title": "Junta de directivos - Abril 2026",
+    "drive_file_id": "1long_audio_xyz",
+    "doc_id": "1doc_meeting_456",
+    "strategy": "auto",
+    "language_code": "es-MX"
+  }'
+```
+
+### 3. Llamada 8x8 (curl)
+
+```bash
+# is_8x8_call ya no cambia el motor, pero se registra en logs para trazabilidad.
 curl -X POST "http://localhost:8080/api/transcribe" \
   -H "Content-Type: application/json" \
   -d '{
@@ -395,11 +471,12 @@ curl -X POST "http://localhost:8080/api/transcribe" \
     "drive_file_id": "1stereo_call_123",
     "doc_id": "1doc_call_456",
     "is_8x8_call": true,
+    "strategy": "auto",
     "language_code": "es-MX"
   }'
 ```
 
-### 3. Con callback a Google Sheets (Python)
+### 4. Con callback a Google Sheets (Python)
 
 ```python
 import requests
@@ -424,10 +501,13 @@ response = requests.post(
     }
 )
 
-print(response.json())
+result = response.json()
+print(f"Segmentado: {result['segmented']}")
+print(f"Duración total: {result['duration_seconds']:.1f}s")
+print(f"Doc: {result['doc_url']}")
 ```
 
-### 4. Desde Google Apps Script
+### 5. Desde Google Apps Script
 
 ```javascript
 function transcribeAudio(driveFileId, docId) {
@@ -452,7 +532,8 @@ function transcribeAudio(driveFileId, docId) {
   const response = UrlFetchApp.fetch(API_URL, options);
   const result = JSON.parse(response.getContentText());
 
-  Logger.log('Resultado: ' + JSON.stringify(result));
+  Logger.log('Segmentado: ' + result.segmented);
+  Logger.log('Doc URL: ' + result.doc_url);
   return result;
 }
 ```
@@ -471,10 +552,10 @@ Para más ejemplos detallados, consulta [API_EXAMPLES.md](./API_EXAMPLES.md).
 
 ### Métricas disponibles
 
-- Latencias de transcripción por motor
-- Conteos de éxito/error
-- Tiempos de normalización
-- Uso de enrutamiento (auto vs. manual)
+- Latencias de transcripción por motor (`STT_PHASE_SECONDS`)
+- Latencia total del pipeline (`PIPELINE_DURATION_SECONDS`)
+- Conteos de éxito por motor (`TRANSCRIPTIONS_TOTAL`)
+- Conteos de error por código (`TRANSCRIPTIONS_ERRORS_TOTAL`)
 
 ---
 
@@ -486,7 +567,7 @@ Para más ejemplos detallados, consulta [API_EXAMPLES.md](./API_EXAMPLES.md).
 
 **Solución**:
 1. Verifica que el `drive_file_id` es correcto
-2. Comparte el archivo con `drive-sheets@ortega-473114.iam.gserviceaccount.com` en modo Lector
+2. Comparte el archivo con `sa-transcriptor@ortega-473114.iam.gserviceaccount.com` en modo Lector
 3. O coloca el archivo en un Shared Drive accesible
 
 ### Error: "No se pudo escribir en el documento"
@@ -494,7 +575,7 @@ Para más ejemplos detallados, consulta [API_EXAMPLES.md](./API_EXAMPLES.md).
 **Causa**: Google Doc no compartido con la cuenta de servicio.
 
 **Solución**:
-1. Comparte el documento con `drive-sheets@ortega-473114.iam.gserviceaccount.com` en modo **Editor**
+1. Comparte el documento con la cuenta de servicio en modo **Editor**
 2. O crea el documento en un Shared Drive accesible
 
 ### Error: "Failed to update Google Sheet"
@@ -506,15 +587,41 @@ Para más ejemplos detallados, consulta [API_EXAMPLES.md](./API_EXAMPLES.md).
 2. Verifica que `sheet_name` coincide exactamente con el nombre de la pestaña
 3. Verifica que las columnas especificadas (`E`, `F`, `G`, `H`) son válidas
 
-### Rendimiento: Transcripciones lentas
+### Error: "ffprobe: command not found"
 
-**Posibles causas**:
-1. Normalización innecesaria activada para Gemini
-2. Archivos muy grandes sin compresión
+**Causa**: `ffmpeg`/`ffprobe` no está instalado en el sistema.
+
+**Efecto**: La detección de duración falla, el sistema usa transcripción directa (sin segmentar). No rompe el pipeline, pero audios >20 min pueden tener resultados incompletos.
 
 **Solución**:
-- Usa `strategy: "gemini_flash"` para audios cortos (evita normalización)
-- Comprime videos antes de subirlos a Drive
+```bash
+# Ubuntu/Debian
+sudo apt-get install ffmpeg
+
+# macOS
+brew install ffmpeg
+```
+
+### Transcripción incompleta en audios largos
+
+**Causa**: `ffprobe` no está disponible → duración desconocida → no se activa segmentación.
+
+**Verificar**:
+```bash
+ffprobe -version
+```
+
+**Alternativa temporal**: Si ffprobe no está disponible y el audio es largo, el log mostrará `"Duración desconocida — se usará transcripción directa."` Instalar ffmpeg resuelve el problema.
+
+### Rendimiento: Fragmentos lentos
+
+**Posibles causas**:
+1. `MAX_PARALLEL_FRAGMENTS` = 4 puede ser bajo para muchos fragmentos
+2. Latencia de red a Vertex AI
+
+**Solución**:
+- Aumenta `MAX_PARALLEL_FRAGMENTS` en `runner.py` (considera cuotas de Gemini)
+- Verifica que el bucket GCS y el servicio Vertex están en la misma región
 
 ---
 
@@ -538,17 +645,21 @@ Para más ejemplos detallados, consulta [API_EXAMPLES.md](./API_EXAMPLES.md).
      --timeout 900
    ```
 
+   > Para audios muy largos (>1h) considera aumentar `--timeout` y `--memory`.
+
 3. **Configurar variables de entorno** en la consola de Cloud Run:
    - `GCP_PROJECT_ID`
    - `GCP_REGION`
    - `GCS_BUCKET`
-   - `SPEECH_RECOGNIZER`
-   - `TRANSCRIBER_ENGINE`
+   - `GEMINI_VERTEX`
+   - `SPEECH_RECOGNIZER` *(solo si usas STT V1 legacy)*
 
 4. **Montar credenciales** como Secret Manager:
    ```bash
    gcloud secrets create service-account-key --data-file=./credencial/sa.json
    ```
+
+   > Asegúrate de que `ffmpeg` esté incluido en el `Dockerfile`.
 
 Para más detalles, consulta [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md).
 
@@ -556,7 +667,7 @@ Para más detalles, consulta [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md).
 
 ## 🛠️ Herramientas CLI
 
-### Gestión de recognizers STT
+### Gestión de recognizers STT (legacy)
 
 ```bash
 # Listar recognizers
@@ -590,9 +701,21 @@ Proyecto interno de TMF.
 
 ## 📊 Changelog
 
+### v3.0 (Abril 2026)
+- 🚀 **Gemini Flash como motor único** — STT V1 Stereo queda como fallback legacy
+- ✨ **Pipeline de segmentación automática** para audios >20 min:
+  - Fragmentos de 15 min con 90 s de solapamiento vía `ffmpeg -c copy`
+  - Transcripción paralela de fragmentos (hasta 4 workers simultáneos)
+  - Consolidación inteligente con Gemini Flash (elimina solapes, unifica hablantes)
+- ✨ **Detección de duración** con `ffprobe` como paso 2 del pipeline
+- ✨ **Respaldo automático TXT** en GCS para cada transcripción
+- 🔄 Router simplificado: decisión única por duración (>20 min → segmentar)
+- ✨ Campo `segmented` en la respuesta para trazabilidad
+- 📝 Corrección de schemas y actualización de constantes de segmentación
+
 ### v2.1 (Febrero 2026)
 - ✨ Nueva estrategia `"gemini_pro"` para mayor capacidad de análisis
-- ✨ **Service chaining**: encadenamiento via webhook (`next_service_callback`) y cola de tareas (`next_step_task`)
+- ✨ **Service chaining**: encadenamiento via webhook y cola de tareas (`next_step_task`)
 - ✨ Campo `bucket_name` para sobreescribir el bucket GCS por petición
 - ✨ Modelo Gemini configurable mediante variable de entorno `GEMINI_VERTEX`
 - 📝 Actualización y corrección de schemas
